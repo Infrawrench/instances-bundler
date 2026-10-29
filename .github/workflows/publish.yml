@@ -1,0 +1,46 @@
+name: publish
+
+on:
+  schedule:
+    # Every 5 minutes, the shortest interval GitHub allows. Runs can start late under load.
+    - cron: "*/5 * * * *"
+  workflow_dispatch:
+
+# Only one publish at a time. A run triggered while one is going waits instead of cancelling it,
+# and GitHub keeps at most one waiting run, so the queue never builds up.
+concurrency:
+  group: publish
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: false
+
+      - name: Install the AWS CLI
+        run: |
+          if ! command -v aws >/dev/null; then
+            curl -fsSL https://awscli.amazonaws.com/awscli-exe-linux-aarch64.zip -o "$RUNNER_TEMP/awscli.zip"
+            unzip -q "$RUNNER_TEMP/awscli.zip" -d "$RUNNER_TEMP"
+            sudo "$RUNNER_TEMP/aws/install"
+          fi
+          aws --version
+          for cmd in jq xz shasum; do command -v "$cmd"; done
+
+      - name: Publish
+        run: ./publish.sh
+        env:
+          R2_BUCKET: ${{ vars.R2_BUCKET }}
+          R2_ACCOUNT_ID: ${{ vars.R2_ACCOUNT_ID }}
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          TMPDIR: ${{ runner.temp }}
