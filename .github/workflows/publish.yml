@@ -4,7 +4,6 @@ on:
   schedule:
     # Every 5 minutes, the shortest interval GitHub allows. Runs can start late, or be skipped, under load.
     - cron: "*/5 * * * *"
-  workflow_dispatch:
 
 # Only one publish at a time. A run triggered while one is going waits instead of cancelling it,
 # and GitHub keeps at most one waiting run, so the queue never builds up.
