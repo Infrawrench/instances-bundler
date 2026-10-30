@@ -9,19 +9,19 @@ Supported offers, all priced per instance type:
 | Platform | Offer code | Fields that pick a price (`variant_keys`) |
 | --- | --- | --- |
 | ec2 | `AmazonEC2` | operatingSystem, tenancy, licenseModel, preInstalledSw, capacitystatus |
-| rds | `AmazonRDS` | databaseEngine, databaseEdition, licenseModel, deploymentOption, deploymentModel, engineMediaType, usagetype |
+| rds | `AmazonRDS` | databaseEngine, databaseEdition, licenseModel, deploymentOption, deploymentModel, engineMediaType, engineCode, usagetype |
 | elasticache | `AmazonElastiCache` | cacheEngine, usagetype |
 | opensearch | `AmazonES` | usagetype |
 | redshift | `AmazonRedshift` | usagetype |
 | docdb | `AmazonDocDB` | usagetype |
-| neptune | `AmazonNeptune` | m-ncu, usagetype |
+| neptune | `AmazonNeptune` | m-ncu, mncu, usagetype |
 | memorydb | `AmazonMemoryDB` | engine, usagetype |
 | dax | `AmazonDAX` | usagetype |
-| sagemaker | `AmazonSageMaker` | component, usagetype |
+| sagemaker | `AmazonSageMaker` | component, platoinstancetype, usagetype |
 | emr | `ElasticMapReduce` | softwareType, usagetype |
-| gamelift | `AmazonGameLift` | operatingSystem, isSpotInstance, usagetype |
+| gamelift | `AmazonGameLift` | operatingSystem, isSpotInstance, operation, usagetype |
 
-The tool reads the offer from the file's `offerCode`, so there is no flag for it. Offers are configured in `offers.go`. Each offer's keys were picked so that no two products in one region share a price key in its current price list.
+The tool reads the offer from the file's `offerCode`, so there is no flag for it. Offers are configured in `offers.go`. Each offer's keys were picked so that no two products in one region share a price key in any published version. The exceptions are a few AWS mislabels in old SageMaker files, where one price is kept.
 
 ## Usage
 
@@ -72,7 +72,7 @@ R2_BUCKET=my-bucket R2_ACCOUNT_ID=abc123 \
 AWS_ACCESS_KEY_ID=... AWS_SECRET_ACCESS_KEY=... ./publish-rds.sh
 ```
 
-If the bucket has no `<prefix>latest`, the script seeds a new bundle from scratch. For EC2 that is a 400 GB seed, so seed EC2 from a machine that already has a bundle rather than from CI. The other platforms can seed from scratch in CI on their first run.
+If the bucket has no `<prefix>latest`, the script seeds a new bundle from scratch. For EC2 that is a 400 GB seed, so seed EC2 from a machine that already has a bundle rather than from CI. The other platforms can seed from scratch in CI on their first run. To rebuild an existing bundle from scratch, for example after changing an offer's `variant_keys` (which makes the old bundle unreadable), run its script with `RESEED=1`. That publishes a new bundle and moves `<prefix>latest` to it, leaving the old bundles in the bucket. `publish-script.yml` has a matching `reseed` input.
 
 `.github/workflows/publish.yml` has one cron and one job per platform: EC2 every 5 minutes, and the others every 15 minutes at staggered offsets. All run on `ubuntu-24.04-arm`. Each job runs the steps in `publish-script.yml`, and only one run per platform happens at a time. The jobs read the repository variables `R2_BUCKET` and `R2_ACCOUNT_ID`, and the secrets `R2_ACCESS_KEY_ID` and `R2_SECRET_ACCESS_KEY` (an R2 API token with read and write access to the bucket).
 
@@ -132,7 +132,7 @@ All strings live in `compression_table`, most used first, and everything else re
 
 ### Values that are normalized or chosen
 
-- **Attributes:** these per-product fields are left out of attributes: `location`, `usagetype`, `operation`, `instancesku`, `servicecode`, `servicename`, the variant fields, and a few per-offer fields that change with the variant rather than the instance (such as RDS `engineCode`; see `Dropped` in `offers.go`). `productFamily` is added as an attribute.
+- **Attributes:** these per-product fields are left out of attributes: `location`, `usagetype`, `operation`, `instancesku`, `servicecode`, `servicename`, the variant fields, and a few per-offer fields that change with the variant rather than the instance (such as ElastiCache `year_number`; see `Dropped` in `offers.go`). `productFamily` is added as an attribute.
 - **usagetype variant:** for every offer but EC2, the variant's `usagetype` has the region prefix and everything from `:` on removed. So `APS3-InstanceUsage:db.r5.large` is stored as `InstanceUsage`, and one usage is one variant in every region.
 - **Region attributes:** `regionCode` and `locationType` describe the location, not the instance, so they're stored once per region in `regions` instead of as overrides on every instance. Older files without `regionCode` simply leave it out for that region.
 - **Disagreeing products:** when products in one region disagree on an attribute, the value most of them have is kept.

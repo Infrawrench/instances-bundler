@@ -20,6 +20,8 @@
 #   R2_ENDPOINT    endpoint URL; overrides R2_ACCOUNT_ID
 #   AWS_PROFILE    or AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY: the R2 API token's credentials
 #   TMPDIR         where the bundle and seed.sh's downloads go
+#   RESEED         set to 1 to build a new bundle from scratch even if the bucket has one, such as after an
+#                  offer's variant keys change; older bundles are left in the bucket
 # Any other variable seed.sh reads (MAX_VERSIONS, HOST_SUFFIX) is passed through.
 set -euo pipefail
 
@@ -77,7 +79,9 @@ bundle="$work/bundle.json"
 
 latest="${prefix}latest"
 before=""
-if exists "$latest"; then
+if [[ "${RESEED:-}" == 1 ]]; then
+  echo "publish: RESEED is set, building a new $offer bundle from scratch" >&2
+elif exists "$latest"; then
   r2 s3 cp --only-show-errors "s3://$bucket/$latest" "$work/latest"
   ts="$(tr -d '[:space:]' < "$work/latest")"
   if [[ ! "$ts" =~ ^[A-Za-z0-9._-]+$ ]]; then

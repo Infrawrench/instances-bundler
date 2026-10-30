@@ -8,6 +8,11 @@ on:
         description: The publish-<platform>.sh script to run
         required: true
         type: string
+      reseed:
+        description: Build the bundle from scratch instead of updating the published one
+        required: false
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -41,3 +46,4 @@ jobs:
           AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
           AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
           TMPDIR: ${{ runner.temp }}
+          RESEED: ${{ inputs.reseed && '1' || '' }}

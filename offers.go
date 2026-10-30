@@ -17,20 +17,24 @@ type Offer struct {
 	SkipFamilies []string
 	// Dropped are fields that change with the variant rather than describing the instance.
 	Dropped []string
+	// UsageNames takes the instance type from the usagetype, after ":", when instanceType is "NA".
+	UsageNames bool
 }
 
 // defaultOffer is the offer of bundles that don't record one: EC2 bundles leave it out so their format is unchanged.
 const defaultOffer = "AmazonEC2"
 
 // maxVariantKeys is the most VariantKeys any offer has.
-const maxVariantKeys = 7
+const maxVariantKeys = 8
 
-// The keys were picked so no two products in one region share a variant in the current price lists.
+// The keys were picked so no two products in one region share a variant in any published version, except
+// for a few AWS mislabels in old SageMaker files (such as Stockholm prices listed under Frankfurt).
 var offers = map[string]Offer{
 	"AmazonEC2": {VariantKeys: []string{"operatingSystem", "tenancy", "licenseModel", "preInstalledSw", "capacitystatus"}},
 	"AmazonRDS": {
-		VariantKeys: []string{"databaseEngine", "databaseEdition", "licenseModel", "deploymentOption", "deploymentModel", "engineMediaType", "usagetype"},
-		Dropped:     []string{"engineCode", "normalizationSizeFactor"},
+		// engineCode tells apart engines with the same name, such as PostgreSQL 14 and 220 in 2019-20.
+		VariantKeys: []string{"databaseEngine", "databaseEdition", "licenseModel", "deploymentOption", "deploymentModel", "engineMediaType", "engineCode", "usagetype"},
+		Dropped:     []string{"normalizationSizeFactor"},
 	},
 	"AmazonElastiCache": {
 		VariantKeys: []string{"cacheEngine", "usagetype"},
@@ -47,7 +51,8 @@ var offers = map[string]Offer{
 		Dropped:      []string{"storageType", "volume_optimization", "volumeType", "year_number", "engine_major_version"},
 	},
 	"AmazonNeptune": {
-		VariantKeys: []string{"m-ncu", "usagetype"},
+		// Versions from late 2024 to mid 2025 spell m-ncu as mncu.
+		VariantKeys: []string{"m-ncu", "mncu", "usagetype"},
 		Dropped:     []string{"normalizationSizeFactor", "volumeType"},
 	},
 	"AmazonMemoryDB": {
@@ -56,12 +61,16 @@ var offers = map[string]Offer{
 	},
 	"AmazonDAX": {VariantKeys: []string{"usagetype"}},
 	"AmazonSageMaker": {
-		VariantKeys:  []string{"component", "usagetype"},
+		// platoinstancetype tells apart Cluster and Cluster-Reserved.
+		VariantKeys:  []string{"component", "platoinstancetype", "usagetype"},
 		SkipFamilies: []string{"Data Transfer"},
-		Dropped:      []string{"platoinstancetype", "platoinstancename"},
+		Dropped:      []string{"platoinstancename"},
+		// Geospatial processing listed instanceType as NA until 2025, with the type only in the usagetype.
+		UsageNames: true,
 	},
 	"ElasticMapReduce": {VariantKeys: []string{"softwareType", "usagetype"}},
-	"AmazonGameLift":   {VariantKeys: []string{"operatingSystem", "isSpotInstance", "usagetype"}},
+	// operation tells apart FleetIQ and GameLift-managed instances.
+	"AmazonGameLift": {VariantKeys: []string{"operatingSystem", "isSpotInstance", "operation", "usagetype"}},
 }
 
 // offerAttrs are per-SKU identifiers and the location; none of them describe the instance itself.

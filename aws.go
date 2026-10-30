@@ -176,6 +176,9 @@ func (a *awsReader) intern(s string) string {
 
 func (a *awsReader) addProduct(sku string, p awsProduct) {
 	name := p.Attributes["instanceType"]
+	if name == "NA" && a.offer.UsageNames {
+		_, name, _ = strings.Cut(p.Attributes["usagetype"], ":")
+	}
 	if name == "" || slices.Contains(a.offer.SkipFamilies, p.ProductFamily) {
 		return
 	}

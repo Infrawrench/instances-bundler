@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"maps"
+	"slices"
 	"testing"
 )
 
@@ -355,9 +356,9 @@ func TestOffer(t *testing.T) {
 	}
 	inst := b.Instances["db.m5.large"]
 	if _, ok := inst.Attrs["engineCode"]; ok {
-		t.Errorf("engineCode should be dropped, attrs %v", inst.Attrs)
+		t.Errorf("engineCode is a variant key, so it should not be an attribute: %v", inst.Attrs)
 	}
-	multiAZ := Variant{"MySQL", "", "No License required", "Multi-AZ", "", "", "Multi-AZUsage"}
+	multiAZ := Variant{"MySQL", "", "No License required", "Multi-AZ", "", "", "2", "Multi-AZUsage"}
 	if got := inst.LiveOD()[odKey{"EU (Ireland)", multiAZ}]; got != 0.38 {
 		t.Errorf("Ireland Multi-AZ price %v, want 0.38; prices %v", got, inst.LiveOD())
 	}
@@ -374,7 +375,7 @@ func TestOffer(t *testing.T) {
 	if err := json.Unmarshal(buf.Bytes(), &raw); err != nil {
 		t.Fatal(err)
 	}
-	if raw.Offer != "AmazonRDS" || len(raw.VariantKeys) != 7 || len(raw.Variants) != 2 || len(raw.Variants[0]) != 7 {
+	if raw.Offer != "AmazonRDS" || len(raw.VariantKeys) != 8 || len(raw.Variants) != 2 || len(raw.Variants[0]) != 8 {
 		t.Errorf("offer %q, variant keys %v, variants %v", raw.Offer, raw.VariantKeys, raw.Variants)
 	}
 
@@ -408,6 +409,19 @@ func TestNoOffer(t *testing.T) {
 		t.Errorf("on-demand %v, want %v at 0.096", got, want)
 	}
 	roundTrip(t, b)
+}
+
+func TestUsageNames(t *testing.T) {
+	f := newFixture("2024-01-01T00:00:00Z")
+	f.offer = "AmazonSageMaker"
+	f.product("A", "ML Instance", "NA", "US West (Oregon)", "", "2023-12-01T00:00:00Z", "0.96",
+		"component", "Processing_Geo", "usagetype", "USW2-Processing_Geo:ml.m4.4xlarge")
+	f.product("B", "ML Instance", "NA", "US West (Oregon)", "", "2023-12-01T00:00:00Z", "2.4",
+		"component", "Processing_Geo", "usagetype", "USW2-Processing_Geo:ml.m4.10xlarge")
+	s := f.snapshot(t)
+	if s.Collisions != 0 || s.Instances["ml.m4.4xlarge"] == nil || s.Instances["ml.m4.10xlarge"] == nil {
+		t.Errorf("NA instance types should be named from the usagetype: %d collisions, instances %v", s.Collisions, slices.Collect(maps.Keys(s.Instances)))
+	}
 }
 
 func TestTrimUsage(t *testing.T) {
