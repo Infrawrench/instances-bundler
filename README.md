@@ -1,8 +1,27 @@
 # instances-bundler
 
-Compresses AWS EC2 price list files (`index.json` from the AWS Price List API) into one small JSON file that keeps the history of every instance's attributes, on-demand prices and reserved prices across many files.
+Compresses AWS price list files (`index.json` from the AWS Price List bulk API) into one small JSON file per offer. The file keeps the history of every instance's attributes, on-demand prices and reserved prices across many files.
 
-A 1.5 GB AWS file becomes about 30.5 MB of minified JSON (5.4 MB gzipped). Each later file adds only the rows that changed.
+A 1.5 GB AWS EC2 file becomes about 30.5 MB of minified JSON (5.4 MB gzipped). Each later file adds only the rows that changed.
+
+Supported offers, all priced per instance type:
+
+| Platform | Offer code | Fields that pick a price (`variant_keys`) |
+| --- | --- | --- |
+| ec2 | `AmazonEC2` | operatingSystem, tenancy, licenseModel, preInstalledSw, capacitystatus |
+| rds | `AmazonRDS` | databaseEngine, databaseEdition, licenseModel, deploymentOption, deploymentModel, engineMediaType, usagetype |
+| elasticache | `AmazonElastiCache` | cacheEngine, usagetype |
+| opensearch | `AmazonES` | usagetype |
+| redshift | `AmazonRedshift` | usagetype |
+| docdb | `AmazonDocDB` | usagetype |
+| neptune | `AmazonNeptune` | m-ncu, usagetype |
+| memorydb | `AmazonMemoryDB` | engine, usagetype |
+| dax | `AmazonDAX` | usagetype |
+| sagemaker | `AmazonSageMaker` | component, usagetype |
+| emr | `ElasticMapReduce` | softwareType, usagetype |
+| gamelift | `AmazonGameLift` | operatingSystem, isSpotInstance, usagetype |
+
+The tool reads the offer from the file's `offerCode`, so there is no flag for it. Offers are configured in `offers.go`. Each offer's keys were picked so that no two products in one region share a price key in its current price list.
 
 ## Usage
 
@@ -23,32 +42,41 @@ curl -s https://pricing.us-east-1.amazonaws.com/offers/v1.0/aws/AmazonEC2/curren
 ./instances-bundler upgrade bundle.json
 ```
 
-To build a bundle from every published version of the EC2 price list, run `./seed.sh [bundle.json]`. The first version creates the bundle and the rest are appended. Re-running it skips versions the bundle already has, so it can be stopped and resumed.
+To build a bundle from every published version of an offer's price list, run `./seed.sh [bundle.json]`, with `OFFER=AmazonRDS` (or another offer code) for anything but EC2. The first version creates the bundle and the rest are appended. Re-running it skips versions the bundle already has, so it can be stopped and resumed.
 
 A version's ID is usually its `publicationDate`, but not always: `20190828220000` was published at `2019-08-28T20:49:02Z`. So for versions near the bundle's latest, the script reads the real date from the first 4 KB of the file before downloading the rest.
 
-A full seed is 123 versions, about 400 GB of downloads; recent files are about 9 GB each. Only one file is on disk at a time, in `$TMPDIR`. Set `MAX_VERSIONS=n` to add only the next `n` versions.
+A full EC2 seed is 123 versions, about 400 GB of downloads; recent files are about 9 GB each. The other offers are much smaller. The largest is RDS: 119 versions, with recent files about 600 MB. Only one file is on disk at a time, in `$TMPDIR`. Set `MAX_VERSIONS=n` to add only the next `n` versions.
 
-Append files oldest first. `append` rejects a file whose `publicationDate` is not newer than the bundle's latest, exiting with status 3 so scripts can tell that apart from a real failure.
+Append files oldest first, and only files for the bundle's offer. `append` rejects a file whose `publicationDate` is not newer than the bundle's latest, exiting with status 3 so scripts can tell that apart from a real failure.
 
 `append` and `upgrade` both convert older bundles automatically, for example moving `regionCode` and `locationType` off instances into the `regions` table.
 
-`-host-suffix` (default `.host`) is added to Dedicated Host names. AWS names hosts by family (`m5`), and `.metal` would collide with real bare-metal instances such as `m5.metal`. Use the same suffix for every append to a bundle.
+`-host-suffix` (default `.host`) is added to EC2 Dedicated Host names. AWS names hosts by family (`m5`), and `.metal` would collide with real bare-metal instances such as `m5.metal`. Use the same suffix for every append to a bundle.
 
-Non-instance products (data transfer, EBS, IPs, load balancers, and so on) are dropped.
+Products without an `instanceType` (data transfer, EBS, IPs, load balancers, storage, and so on) are dropped, as are a few families that have one but aren't priced per instance hour (Redshift concurrency scaling and managed storage, DocumentDB CPU credits).
 
 ## Publishing
 
-`publish.sh` keeps a bundle up to date in a Cloudflare R2 bucket. The bucket holds `latest`, whose contents are a timestamp, and `bundle-<timestamp>.json.xz` for each published bundle. The script downloads the bundle `latest` points at, runs `seed.sh` on it, and if anything was added uploads it as a new `bundle-<now>.json.xz` before moving `latest`.
+`publish-<platform>.sh` keeps one platform's bundle up to date in a Cloudflare R2 bucket. Each script calls `publish-offer.sh <offer> <prefix>`. All platforms share one bucket and are kept apart by a key prefix:
+
+| Platform | Keys |
+| --- | --- |
+| ec2 | `latest`, `bundle-<timestamp>.json.xz` |
+| rds, elasticache, … | `<platform>-latest`, `<platform>-bundle-<timestamp>.json.xz` (e.g. `rds-latest`) |
+
+EC2 keeps its unprefixed keys because they were in use before the other platforms were added. `<prefix>latest` holds a timestamp. The script downloads the bundle it points at, runs `seed.sh` on it, and if anything was added uploads it as a new `<prefix>bundle-<now>.json.xz` before moving `<prefix>latest`.
 
 ```sh
 R2_BUCKET=my-bucket R2_ACCOUNT_ID=abc123 \
-AWS_ACCESS_KEY_ID=... AWS_SECRET_ACCESS_KEY=... ./publish.sh
+AWS_ACCESS_KEY_ID=... AWS_SECRET_ACCESS_KEY=... ./publish-rds.sh
 ```
 
-If the bucket has no `latest`, it seeds a new bundle from scratch, which is a full 400 GB seed. Seed big buckets from a machine that already has a bundle rather than from CI.
+If the bucket has no `<prefix>latest`, the script seeds a new bundle from scratch. For EC2 that is a 400 GB seed, so seed EC2 from a machine that already has a bundle rather than from CI. The other platforms can seed from scratch in CI on their first run.
 
-`.github/workflows/publish.yml` runs `publish.sh` every 5 minutes on `ubuntu-24.04-arm`, and on demand from the Actions tab. Only one run happens at a time. It reads the repository variables `R2_BUCKET` and `R2_ACCOUNT_ID`, and the secrets `R2_ACCESS_KEY_ID` and `R2_SECRET_ACCESS_KEY` (an R2 API token with read and write access to the bucket).
+`.github/workflows/publish.yml` has one cron and one job per platform: EC2 every 5 minutes, and the others every 15 minutes at staggered offsets. All run on `ubuntu-24.04-arm`. Each job runs the steps in `publish-script.yml`, and only one run per platform happens at a time. The jobs read the repository variables `R2_BUCKET` and `R2_ACCOUNT_ID`, and the secrets `R2_ACCESS_KEY_ID` and `R2_SECRET_ACCESS_KEY` (an R2 API token with read and write access to the bucket).
+
+To add a platform, add its offer to `offers.go`, add a `publish-<platform>.sh`, and add a cron and a job to `publish.yml`.
 
 ## Format
 
@@ -56,6 +84,7 @@ All strings live in `compression_table`, most used first, and everything else re
 
 ```jsonc
 {
+  "offer": "AmazonRDS",                    // left out of EC2 bundles; a bundle without it is EC2
   "compression_table": ["US West (Oregon)", "US East (N. Virginia)", ...],
   "snapshots": [1600976855, ...],          // publicationDate of every file appended, oldest first
 
@@ -63,8 +92,10 @@ All strings live in `compression_table`, most used first, and everything else re
     [<location>, [[<key>, <value>], ...]]  // e.g. "US East (N. Virginia)": regionCode us-east-1, locationType AWS Region
   ],
 
-  "variants": [                            // the product fields that pick a price
-    [<os>, <tenancy>, <licenseModel>, <preInstalledSw>, <capacitystatus>]
+  "variant_keys": ["databaseEngine", ...], // names of the variant fields; left out of EC2 bundles, whose keys are
+                                           // operatingSystem, tenancy, licenseModel, preInstalledSw, capacitystatus
+  "variants": [                            // the product fields that pick a price, one per variant key
+    [<value>, ...]
   ],
   "reserved_terms": [
     [<lease>, <offeringClass>, <purchaseOption>]
@@ -101,7 +132,8 @@ All strings live in `compression_table`, most used first, and everything else re
 
 ### Values that are normalized or chosen
 
-- **Attributes:** these per-product fields are left out of attributes: `location`, `usagetype`, `operation`, `instancesku`, `servicecode`, `servicename` and the five variant fields. `productFamily` is added as an attribute.
+- **Attributes:** these per-product fields are left out of attributes: `location`, `usagetype`, `operation`, `instancesku`, `servicecode`, `servicename`, the variant fields, and a few per-offer fields that change with the variant rather than the instance (such as RDS `engineCode`; see `Dropped` in `offers.go`). `productFamily` is added as an attribute.
+- **usagetype variant:** for every offer but EC2, the variant's `usagetype` has the region prefix and everything from `:` on removed. So `APS3-InstanceUsage:db.r5.large` is stored as `InstanceUsage`, and one usage is one variant in every region.
 - **Region attributes:** `regionCode` and `locationType` describe the location, not the instance, so they're stored once per region in `regions` instead of as overrides on every instance. Older files without `regionCode` simply leave it out for that region.
 - **Disagreeing products:** when products in one region disagree on an attribute, the value most of them have is kept.
 - **Spellings:** purchase options and lease lengths are cleaned up (`PartialUpfront` → `Partial Upfront`, `3 yr` → `3yr`).

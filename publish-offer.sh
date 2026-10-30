@@ -1,12 +1,18 @@
 #!/usr/bin/env bash
-# Updates the bundle stored in R2 with any EC2 price list versions published since it was built.
+# Updates the bundle for one AWS offer stored in R2 with any price list versions published since it was built.
+# The publish-<platform>.sh scripts call this with their offer and prefix.
 #
-# The bucket holds `latest`, whose contents are a timestamp, and `bundle-<timestamp>.json.xz` for each
-# published bundle. This downloads the bundle `latest` points at, runs seed.sh on it, and if seed.sh
-# changed it uploads it as bundle-<now>.json.xz and then points `latest` at <now>. When the bucket has
-# no `latest` yet, seed.sh builds a bundle from scratch (a full seed downloads ~400 GB).
+# The bucket holds `<prefix>latest`, whose contents are a timestamp, and `<prefix>bundle-<timestamp>.json.xz`
+# for each published bundle. This downloads the bundle `<prefix>latest` points at, runs seed.sh on it, and if
+# seed.sh changed it uploads it as <prefix>bundle-<now>.json.xz and then points `<prefix>latest` at <now>.
+# When the bucket has no `<prefix>latest` yet, seed.sh builds a bundle from scratch (a full EC2 seed
+# downloads ~400 GB; the other offers are far smaller).
 #
-#   R2_BUCKET=my-bucket R2_ACCOUNT_ID=abc123 ./publish.sh
+#   R2_BUCKET=my-bucket R2_ACCOUNT_ID=abc123 ./publish-offer.sh AmazonRDS rds-
+#
+# Arguments:
+#   offer   AWS offer code, such as AmazonEC2 or AmazonRDS
+#   prefix  put before every key in the bucket; empty for EC2, whose keys predate the other offers
 #
 # Environment:
 #   R2_BUCKET      bucket name (required)
@@ -14,8 +20,19 @@
 #   R2_ENDPOINT    endpoint URL; overrides R2_ACCOUNT_ID
 #   AWS_PROFILE    or AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY: the R2 API token's credentials
 #   TMPDIR         where the bundle and seed.sh's downloads go
-# Any other variable seed.sh reads (MAX_VERSIONS, HOST_SUFFIX, OFFER) is passed through.
+# Any other variable seed.sh reads (MAX_VERSIONS, HOST_SUFFIX) is passed through.
 set -euo pipefail
+
+if [[ $# -ne 2 ]]; then
+  echo "usage: publish-offer.sh <offer> <prefix>" >&2
+  exit 2
+fi
+offer="$1"
+prefix="$2"
+if [[ ! "$offer" =~ ^[A-Za-z0-9]+$ || ! "$prefix" =~ ^[a-z0-9-]*$ ]]; then
+  echo "publish: bad offer '$offer' or prefix '$prefix'" >&2
+  exit 2
+fi
 
 bucket="${R2_BUCKET:?publish: R2_BUCKET is required}"
 if [[ -n "${R2_ENDPOINT:-}" ]]; then
@@ -58,18 +75,19 @@ work="$(mktemp -d "${TMPDIR:-/tmp}/instances-publish.XXXXXX")"
 trap 'rm -rf "$work"' EXIT
 bundle="$work/bundle.json"
 
+latest="${prefix}latest"
 before=""
-if exists latest; then
-  r2 s3 cp --only-show-errors "s3://$bucket/latest" "$work/latest"
+if exists "$latest"; then
+  r2 s3 cp --only-show-errors "s3://$bucket/$latest" "$work/latest"
   ts="$(tr -d '[:space:]' < "$work/latest")"
   if [[ ! "$ts" =~ ^[A-Za-z0-9._-]+$ ]]; then
-    echo "publish: latest holds '$ts', which is not a timestamp" >&2
+    echo "publish: $latest holds '$ts', which is not a timestamp" >&2
     exit 1
   fi
-  key="bundle-$ts.json.xz"
-  # Starting over here would silently replace the history with a 400 GB reseed, so stop instead.
+  key="${prefix}bundle-$ts.json.xz"
+  # Starting over here would silently replace the history with a full reseed, so stop instead.
   if ! exists "$key"; then
-    echo "publish: latest points at $key, which is not in $bucket" >&2
+    echo "publish: $latest points at $key, which is not in $bucket" >&2
     exit 1
   fi
   echo "publish: downloading $key" >&2
@@ -78,23 +96,23 @@ if exists latest; then
   before="$(sha256 "$bundle")"
   echo "publish: $key sha256 $before" >&2
 else
-  echo "publish: $bucket has no latest, seeding a new bundle" >&2
+  echo "publish: $bucket has no $latest, seeding a new $offer bundle" >&2
 fi
 
-"$here/seed.sh" "$bundle"
+OFFER="$offer" "$here/seed.sh" "$bundle"
 
 after="$(sha256 "$bundle")"
 if [[ "$after" == "$before" ]]; then
-  echo "publish: bundle unchanged, nothing to upload" >&2
+  echo "publish: $offer bundle unchanged, nothing to upload" >&2
   exit 0
 fi
 
 now="$(date -u +%s)"
-key="bundle-$now.json.xz"
+key="${prefix}bundle-$now.json.xz"
 echo "publish: bundle sha256 $after, uploading $key" >&2
 xz -T0 -9 "$bundle"
 r2 s3 cp --only-show-errors --content-type application/x-xz "$bundle.xz" "s3://$bucket/$key"
 # Only move latest once the bundle it names is fully uploaded.
 printf '%s\n' "$now" > "$work/latest"
-r2 s3 cp --only-show-errors --content-type text/plain "$work/latest" "s3://$bucket/latest"
-echo "publish: latest is now $now" >&2
+r2 s3 cp --only-show-errors --content-type text/plain "$work/latest" "s3://$bucket/$latest"
+echo "publish: $latest is now $now" >&2

@@ -12,20 +12,11 @@ import (
 	"time"
 )
 
-// Variant is the set of product fields that pick a price: os, tenancy, licenseModel, preInstalledSw, capacitystatus.
-type Variant [5]string
+// Variant is the set of product fields that pick a price, named by the offer's VariantKeys. Unused fields are empty.
+type Variant [maxVariantKeys]string
 
 // Term is a reserved term: lease length, offering class, purchase option.
 type Term [3]string
-
-var variantKeys = [5]string{"operatingSystem", "tenancy", "licenseModel", "preInstalledSw", "capacitystatus"}
-
-// droppedAttrs are per-SKU identifiers, the location, and the variant fields; none of them describe the instance itself.
-var droppedAttrs = map[string]bool{
-	"instanceType": true, "location": true, "usagetype": true, "operation": true,
-	"instancesku": true, "servicecode": true, "servicename": true,
-	"operatingSystem": true, "tenancy": true, "licenseModel": true, "preInstalledSw": true, "capacitystatus": true,
-}
 
 // regionAttrs describe the location rather than the instance, so they are stored once per region.
 var regionAttrs = map[string]bool{"regionCode": true, "locationType": true}
@@ -56,6 +47,7 @@ type rsPrice struct {
 
 // snapshot is one AWS pricing file reduced to what the bundle stores.
 type snapshot struct {
+	Offer      string
 	TS         int64
 	Instances  map[string]*snapInstance
 	Regions    map[string]map[string]string // location -> region attribute -> value
@@ -97,6 +89,9 @@ type rsTerm struct {
 
 type awsReader struct {
 	hostSuffix string
+	offerCode  string
+	offer      Offer
+	dropped    map[string]bool
 	pubDate    string
 	skus       map[string]skuInfo
 	attrCounts map[string]map[string]map[string]map[string]int // name -> region -> key -> value -> SKUs
@@ -106,7 +101,8 @@ type awsReader struct {
 	strs       map[string]string
 }
 
-// readAWS streams an AWS EC2 offer file, keeping only instance products and their on-demand and reserved prices.
+// readAWS streams an AWS offer file, keeping only instance products and their on-demand and reserved prices.
+// The file's offerCode picks how it is read, so it must come before the products, as it does in AWS files.
 func readAWS(r io.Reader, hostSuffix string) (*snapshot, error) {
 	a := &awsReader{
 		hostSuffix: hostSuffix,
@@ -120,9 +116,22 @@ func readAWS(r io.Reader, hostSuffix string) (*snapshot, error) {
 	dec := json.NewDecoder(bufio.NewReaderSize(r, 4<<20))
 	err := eachKey(dec, func(key string) error {
 		switch key {
+		case "offerCode":
+			if err := dec.Decode(&a.offerCode); err != nil {
+				return err
+			}
+			o, err := lookupOffer(a.offerCode)
+			if err != nil {
+				return err
+			}
+			a.offer, a.dropped = o, o.dropped()
+			return nil
 		case "publicationDate":
 			return dec.Decode(&a.pubDate)
 		case "products":
+			if a.dropped == nil {
+				return fmt.Errorf("pricing file has no offerCode before its products")
+			}
 			return eachKey(dec, func(sku string) error {
 				var p awsProduct
 				if err := dec.Decode(&p); err != nil {
@@ -167,7 +176,7 @@ func (a *awsReader) intern(s string) string {
 
 func (a *awsReader) addProduct(sku string, p awsProduct) {
 	name := p.Attributes["instanceType"]
-	if name == "" {
+	if name == "" || slices.Contains(a.offer.SkipFamilies, p.ProductFamily) {
 		return
 	}
 	if p.ProductFamily == "Dedicated Host" {
@@ -176,8 +185,12 @@ func (a *awsReader) addProduct(sku string, p awsProduct) {
 	name = a.intern(name)
 	region := a.intern(p.Attributes["location"])
 	var v Variant
-	for i, k := range variantKeys {
-		v[i] = a.intern(p.Attributes[k])
+	for i, k := range a.offer.VariantKeys {
+		val := p.Attributes[k]
+		if k == "usagetype" {
+			val = trimUsage(val)
+		}
+		v[i] = a.intern(val)
 	}
 	a.skus[sku] = skuInfo{name, region, v}
 
@@ -208,7 +221,7 @@ func (a *awsReader) addProduct(sku string, p awsProduct) {
 		switch {
 		case regionAttrs[k]:
 			count(regKeys, k, val)
-		case !droppedAttrs[k]:
+		case !a.dropped[k]:
 			count(keys, k, val)
 		}
 	}
@@ -261,6 +274,9 @@ func (a *awsReader) addOffers(termType, sku string, offers map[string]awsOffer) 
 }
 
 func (a *awsReader) snapshot() (*snapshot, error) {
+	if a.offerCode == "" {
+		return nil, fmt.Errorf("pricing file has no offerCode")
+	}
 	if a.pubDate == "" {
 		return nil, fmt.Errorf("pricing file has no publicationDate")
 	}
@@ -268,7 +284,7 @@ func (a *awsReader) snapshot() (*snapshot, error) {
 	if err != nil {
 		return nil, fmt.Errorf("publicationDate: %w", err)
 	}
-	s := &snapshot{TS: ts, Instances: map[string]*snapInstance{}, Regions: map[string]map[string]string{}, Products: len(a.skus)}
+	s := &snapshot{Offer: a.offerCode, TS: ts, Instances: map[string]*snapInstance{}, Regions: map[string]map[string]string{}, Products: len(a.skus)}
 	for region, keys := range a.regCounts {
 		if len(keys) == 0 {
 			continue

@@ -1,0 +1,43 @@
+name: publish-script
+
+# The steps every platform's publish job runs; publish.yml calls this once per platform.
+on:
+  workflow_call:
+    inputs:
+      script:
+        description: The publish-<platform>.sh script to run
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: false
+
+      - name: Install the AWS CLI
+        run: |
+          if ! command -v aws >/dev/null; then
+            curl -fsSL https://awscli.amazonaws.com/awscli-exe-linux-aarch64.zip -o "$RUNNER_TEMP/awscli.zip"
+            unzip -q "$RUNNER_TEMP/awscli.zip" -d "$RUNNER_TEMP"
+            sudo "$RUNNER_TEMP/aws/install"
+          fi
+          aws --version
+          for cmd in jq xz shasum; do command -v "$cmd"; done
+
+      - name: Publish
+        run: ./${{ inputs.script }}
+        env:
+          R2_BUCKET: ${{ vars.R2_BUCKET }}
+          R2_ACCOUNT_ID: ${{ vars.R2_ACCOUNT_ID }}
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          TMPDIR: ${{ runner.temp }}

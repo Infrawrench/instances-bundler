@@ -11,7 +11,7 @@ import (
 	"time"
 )
 
-const usage = `instances-bundler compresses AWS EC2 price list files into one small history file.
+const usage = `instances-bundler compresses AWS price list files (EC2, RDS, ElastiCache, ...) into one small history file per offer.
 
 Usage:
   instances-bundler compress [-host-suffix .host] -o <bundle.json> <aws-pricing.json|->

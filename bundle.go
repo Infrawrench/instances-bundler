@@ -13,6 +13,7 @@ import (
 
 // Bundle is a compressed file with every index resolved back to its string; rows keep their full history.
 type Bundle struct {
+	Offer     string // AWS offer code; empty until the first file is appended
 	Snapshots []int64
 	Regions   map[string]map[string]string // location -> region attribute -> value
 	Instances map[string]*Instance
@@ -56,9 +57,11 @@ type RSRow struct {
 }
 
 type bundleFile struct {
+	Offer            string           `json:"offer,omitempty"`
 	CompressionTable []string         `json:"compression_table"`
 	Snapshots        []int64          `json:"snapshots"`
 	Regions          [][]any          `json:"regions"`
+	VariantKeys      []string         `json:"variant_keys,omitempty"`
 	Variants         [][]int          `json:"variants"`
 	ReservedTerms    [][]int          `json:"reserved_terms"`
 	Instances        map[string][]any `json:"instances"`
@@ -66,6 +69,12 @@ type bundleFile struct {
 
 // Write encodes the bundle, ordering the compression table and lookup tables by use so common entries get short indices.
 func (b *Bundle) Write(w io.Writer) error {
+	code := cmp.Or(b.Offer, defaultOffer)
+	offer, err := lookupOffer(code)
+	if err != nil {
+		return err
+	}
+	nkeys := len(offer.VariantKeys)
 	strs := map[string]int{}
 	variants := map[Variant]int{}
 	terms := map[Term]int{}
@@ -101,7 +110,7 @@ func (b *Bundle) Write(w io.Writer) error {
 		}
 	}
 	for v := range variants {
-		for _, s := range v {
+		for _, s := range v[:nkeys] {
 			strs[s]++
 		}
 	}
@@ -124,6 +133,10 @@ func (b *Bundle) Write(w io.Writer) error {
 		ReservedTerms:    make([][]int, len(tlist)),
 		Instances:        make(map[string][]any, len(b.Instances)),
 	}
+	// EC2 bundles are written exactly as they were before other offers were supported.
+	if code != defaultOffer {
+		out.Offer, out.VariantKeys = code, offer.VariantKeys
+	}
 	if out.Snapshots == nil {
 		out.Snapshots = []int64{}
 	}
@@ -136,7 +149,7 @@ func (b *Bundle) Write(w io.Writer) error {
 		out.Regions = append(out.Regions, []any{S[loc], pairs})
 	}
 	for i, v := range vlist {
-		for _, s := range v {
+		for _, s := range v[:nkeys] {
 			out.Variants[i] = append(out.Variants[i], S[s])
 		}
 	}
@@ -221,9 +234,11 @@ func indexOf[K comparable](list []K) map[K]int {
 
 func ReadBundle(r io.Reader) (*Bundle, error) {
 	var raw struct {
+		Offer            string                       `json:"offer"`
 		CompressionTable []string                     `json:"compression_table"`
 		Snapshots        []int64                      `json:"snapshots"`
 		Regions          [][2]json.RawMessage         `json:"regions"`
+		VariantKeys      []string                     `json:"variant_keys"`
 		Variants         [][]int                      `json:"variants"`
 		ReservedTerms    [][]int                      `json:"reserved_terms"`
 		Instances        map[string][]json.RawMessage `json:"instances"`
@@ -231,10 +246,19 @@ func ReadBundle(r io.Reader) (*Bundle, error) {
 	if err := json.NewDecoder(bufio.NewReaderSize(r, 4<<20)).Decode(&raw); err != nil {
 		return nil, fmt.Errorf("decoding bundle: %w", err)
 	}
+	// Bundles written before offers were supported are all EC2.
+	code := cmp.Or(raw.Offer, defaultOffer)
+	offer, err := lookupOffer(code)
+	if err != nil {
+		return nil, err
+	}
+	if raw.VariantKeys != nil && !slices.Equal(raw.VariantKeys, offer.VariantKeys) {
+		return nil, fmt.Errorf("bundle's variant keys %v differ from %s's %v", raw.VariantKeys, code, offer.VariantKeys)
+	}
 	d := &bundleDecoder{table: raw.CompressionTable}
 	for _, v := range raw.Variants {
-		if len(v) != len(Variant{}) {
-			return nil, fmt.Errorf("variant %v should have %d fields", v, len(Variant{}))
+		if len(v) != len(offer.VariantKeys) {
+			return nil, fmt.Errorf("variant %v should have %d fields", v, len(offer.VariantKeys))
 		}
 		var out Variant
 		for i, x := range v {
@@ -252,7 +276,7 @@ func ReadBundle(r io.Reader) (*Bundle, error) {
 		}
 		d.terms = append(d.terms, out)
 	}
-	b := &Bundle{Snapshots: raw.Snapshots, Regions: map[string]map[string]string{}, Instances: make(map[string]*Instance, len(raw.Instances))}
+	b := &Bundle{Offer: code, Snapshots: raw.Snapshots, Regions: map[string]map[string]string{}, Instances: make(map[string]*Instance, len(raw.Instances))}
 	for _, entry := range raw.Regions {
 		var loc int
 		var pairs [][2]int

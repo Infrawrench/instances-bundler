@@ -14,13 +14,14 @@ var regionCodes = map[string]string{
 }
 
 type fixture struct {
+	offer    string
 	pub      string
 	products map[string]awsProduct
 	terms    map[string]map[string]map[string]awsOffer // term type -> sku -> offer code -> offer
 }
 
 func newFixture(pub string) *fixture {
-	return &fixture{pub: pub, products: map[string]awsProduct{}, terms: map[string]map[string]map[string]awsOffer{
+	return &fixture{offer: "AmazonEC2", pub: pub, products: map[string]awsProduct{}, terms: map[string]map[string]map[string]awsOffer{
 		"OnDemand": {}, "Reserved": {},
 	}}
 }
@@ -61,7 +62,7 @@ func (f *fixture) reserved(sku, code, eff, lease, option, hourly, upfront string
 func (f *fixture) snapshot(t *testing.T) *snapshot {
 	t.Helper()
 	data, err := json.Marshal(map[string]any{
-		"formatVersion": "v1.0", "publicationDate": f.pub, "products": f.products, "terms": f.terms,
+		"formatVersion": "v1.0", "offerCode": f.offer, "publicationDate": f.pub, "products": f.products, "terms": f.terms,
 		"zzz": "unknown keys are skipped",
 	})
 	if err != nil {
@@ -328,6 +329,99 @@ func TestRemovedAttribute(t *testing.T) {
 	b = appendOK(t, b, f.snapshot(t), AppendStats{AttrChanges: 1})
 	if c := b.Instances["m5.large"].AttrChanges[0]; c.Value != nil || c.Region != "EU (Ireland)" {
 		t.Errorf("want ecu removed in Ireland only, got %+v", c)
+	}
+}
+
+func TestOffer(t *testing.T) {
+	f := newFixture("2020-01-01T00:00:00Z")
+	f.offer = "AmazonRDS"
+	rds := func(sku, region, engine, deployment, usagetype, price string, extra ...string) {
+		f.product(sku, "Database Instance", "db.m5.large", region, "", "2019-12-01T00:00:00Z", price,
+			append([]string{"databaseEngine", engine, "deploymentOption", deployment, "usagetype", usagetype, "engineCode", "2"}, extra...)...)
+	}
+	rds("A", "US East (N. Virginia)", "MySQL", "Single-AZ", "InstanceUsage:db.m5.large", "0.171")
+	rds("B", "US East (N. Virginia)", "MySQL", "Multi-AZ", "Multi-AZUsage:db.m5.large", "0.342")
+	rds("C", "EU (Ireland)", "MySQL", "Single-AZ", "EU-InstanceUsage:db.m5.large", "0.19")
+	rds("D", "EU (Ireland)", "MySQL", "Multi-AZ", "EU-Multi-AZUsage:db.m5.large", "0.38")
+	f.product("X", "Database Storage", "", "EU (Ireland)", "", "2019-12-01T00:00:00Z", "0.115")
+	s := f.snapshot(t)
+	if s.Collisions != 0 {
+		t.Errorf("%d collisions, want none", s.Collisions)
+	}
+
+	b := appendOK(t, &Bundle{Instances: map[string]*Instance{}}, s, AppendStats{Created: 1, ODRows: 4, RegionChanges: 4})
+	if b.Offer != "AmazonRDS" {
+		t.Errorf("offer %q, want AmazonRDS", b.Offer)
+	}
+	inst := b.Instances["db.m5.large"]
+	if _, ok := inst.Attrs["engineCode"]; ok {
+		t.Errorf("engineCode should be dropped, attrs %v", inst.Attrs)
+	}
+	multiAZ := Variant{"MySQL", "", "No License required", "Multi-AZ", "", "", "Multi-AZUsage"}
+	if got := inst.LiveOD()[odKey{"EU (Ireland)", multiAZ}]; got != 0.38 {
+		t.Errorf("Ireland Multi-AZ price %v, want 0.38; prices %v", got, inst.LiveOD())
+	}
+
+	var buf bytes.Buffer
+	if err := b.Write(&buf); err != nil {
+		t.Fatal(err)
+	}
+	var raw struct {
+		Offer       string   `json:"offer"`
+		VariantKeys []string `json:"variant_keys"`
+		Variants    [][]int  `json:"variants"`
+	}
+	if err := json.Unmarshal(buf.Bytes(), &raw); err != nil {
+		t.Fatal(err)
+	}
+	if raw.Offer != "AmazonRDS" || len(raw.VariantKeys) != 7 || len(raw.Variants) != 2 || len(raw.Variants[0]) != 7 {
+		t.Errorf("offer %q, variant keys %v, variants %v", raw.Offer, raw.VariantKeys, raw.Variants)
+	}
+
+	ec2 := pricing("2020-02-01T00:00:00Z", false, false).snapshot(t)
+	if _, err := b.Append(ec2); err == nil {
+		t.Error("appending an EC2 file to an RDS bundle should fail")
+	}
+}
+
+// TestNoOffer reads a bundle written before bundles recorded their offer, which is EC2.
+func TestNoOffer(t *testing.T) {
+	old := `{"compression_table":["Linux","Shared","NA","Used","m5.large","US East (N. Virginia)"],` +
+		`"snapshots":[100],"regions":[],"variants":[[0,1,2,2,3]],"reserved_terms":[],` +
+		`"instances":{"m5.large":[[],[],0.096,[[100,5,0]],[],100,null]}}`
+	b, err := ReadBundle(bytes.NewReader([]byte(old)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if b.Offer != "AmazonEC2" {
+		t.Errorf("offer %q, want AmazonEC2", b.Offer)
+	}
+	var buf bytes.Buffer
+	if err := b.Write(&buf); err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(buf.Bytes(), []byte(`"offer"`)) || bytes.Contains(buf.Bytes(), []byte(`"variant_keys"`)) {
+		t.Errorf("EC2 bundles should be written without offer or variant_keys: %s", buf.String())
+	}
+	want := odKey{"US East (N. Virginia)", Variant{"Linux", "Shared", "NA", "NA", "Used"}}
+	if got := b.Instances["m5.large"].LiveOD(); got[want] != 0.096 {
+		t.Errorf("on-demand %v, want %v at 0.096", got, want)
+	}
+	roundTrip(t, b)
+}
+
+func TestTrimUsage(t *testing.T) {
+	for in, want := range map[string]string{
+		"InstanceUsage:db.r5.large":                     "InstanceUsage",
+		"APS3-InstanceUsage:db.r5.large":                "InstanceUsage",
+		"EU-Multi-AZUsage:db.m5.large":                  "Multi-AZUsage",
+		"USW2-LAX1-NodeUsage:cache.m5.large":            "NodeUsage",
+		"CAN1-ExtendedSupportYr3-NodeUsage:cache.r4.xl": "ExtendedSupportYr3-NodeUsage",
+		"Multi-AZUsage:db.m5.large":                     "Multi-AZUsage",
+	} {
+		if got := trimUsage(in); got != want {
+			t.Errorf("trimUsage(%q) = %q, want %q", in, got, want)
+		}
 	}
 }
 

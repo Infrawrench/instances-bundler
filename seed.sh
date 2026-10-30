@@ -1,16 +1,17 @@
 #!/usr/bin/env bash
-# Builds a bundle from every published version of the AWS EC2 price list, oldest first:
-# the first file creates the bundle and every later one is appended.
+# Builds a bundle from every published version of an AWS offer's price list (EC2 unless OFFER says
+# otherwise), oldest first: the first file creates the bundle and every later one is appended.
 #
 # Re-running resumes: versions already in the bundle are skipped. Each file is downloaded to a
-# temp dir (up to ~9 GB for recent versions), applied, then deleted. A full seed downloads ~400 GB.
+# temp dir (up to ~9 GB for recent EC2 versions), applied, then deleted. A full EC2 seed downloads
+# ~400 GB; the other offers' files are at most a few hundred MB each.
 #
 #   ./seed.sh [bundle.json]
 #
 # Environment:
 #   MAX_VERSIONS  stop after adding this many versions (default 0 = all)
 #   HOST_SUFFIX   suffix for Dedicated Host names (default .host); keep it the same for a bundle
-#   OFFER         AWS offer code (default AmazonEC2)
+#   OFFER         AWS offer code (default AmazonEC2); the bundle must be for the same offer
 #   TMPDIR        where downloads go while they are applied
 set -euo pipefail
 

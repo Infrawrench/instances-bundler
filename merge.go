@@ -21,6 +21,11 @@ var errNotNewer = errors.New("pricing file is not newer than the bundle")
 // Append records a newer pricing file, adding rows only where its state differs from the bundle's current state.
 func (b *Bundle) Append(s *snapshot) (AppendStats, error) {
 	var st AppendStats
+	if b.Offer == "" {
+		b.Offer = s.Offer
+	} else if b.Offer != s.Offer {
+		return st, fmt.Errorf("pricing file is for %s but the bundle is for %s", s.Offer, b.Offer)
+	}
 	if n := len(b.Snapshots); n > 0 && s.TS <= b.Snapshots[n-1] {
 		return st, fmt.Errorf("%w: file is from %s, bundle already has %s; append files oldest first",
 			errNotNewer, fmtTS(s.TS), fmtTS(b.Snapshots[n-1]))
