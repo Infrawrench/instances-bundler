@@ -3,21 +3,7 @@ name: publish
 # Each platform has its own cron and job. A scheduled run only knows which cron string started it,
 # so every cron string must be unique, and each job's `if` must repeat its platform's string exactly.
 on:
-  schedule:
-    # EC2 every 5 minutes, the shortest interval GitHub allows. Runs can start late, or be skipped, under load.
-    - cron: "*/5 * * * *"
-    # The other platforms every 15 minutes, each at its own offset.
-    - cron: "1,16,31,46 * * * *" # rds
-    - cron: "2,17,32,47 * * * *" # elasticache
-    - cron: "3,18,33,48 * * * *" # opensearch
-    - cron: "4,19,34,49 * * * *" # redshift
-    - cron: "6,21,36,51 * * * *" # docdb
-    - cron: "7,22,37,52 * * * *" # neptune
-    - cron: "8,23,38,53 * * * *" # memorydb
-    - cron: "9,24,39,54 * * * *" # dax
-    - cron: "11,26,41,56 * * * *" # sagemaker
-    - cron: "12,27,42,57 * * * *" # emr
-    - cron: "13,28,43,58 * * * *" # gamelift
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -26,7 +12,6 @@ permissions:
 # and GitHub keeps at most one waiting run per group, so the queue never builds up.
 jobs:
   ec2:
-    if: github.event.schedule == '*/5 * * * *'
     concurrency:
       group: publish-ec2
       cancel-in-progress: false
@@ -36,7 +21,6 @@ jobs:
     secrets: inherit
 
   rds:
-    if: github.event.schedule == '1,16,31,46 * * * *'
     concurrency:
       group: publish-rds
       cancel-in-progress: false
@@ -46,7 +30,6 @@ jobs:
     secrets: inherit
 
   elasticache:
-    if: github.event.schedule == '2,17,32,47 * * * *'
     concurrency:
       group: publish-elasticache
       cancel-in-progress: false
@@ -56,7 +39,6 @@ jobs:
     secrets: inherit
 
   opensearch:
-    if: github.event.schedule == '3,18,33,48 * * * *'
     concurrency:
       group: publish-opensearch
       cancel-in-progress: false
@@ -66,7 +48,6 @@ jobs:
     secrets: inherit
 
   redshift:
-    if: github.event.schedule == '4,19,34,49 * * * *'
     concurrency:
       group: publish-redshift
       cancel-in-progress: false
@@ -76,7 +57,6 @@ jobs:
     secrets: inherit
 
   docdb:
-    if: github.event.schedule == '6,21,36,51 * * * *'
     concurrency:
       group: publish-docdb
       cancel-in-progress: false
@@ -86,7 +66,6 @@ jobs:
     secrets: inherit
 
   neptune:
-    if: github.event.schedule == '7,22,37,52 * * * *'
     concurrency:
       group: publish-neptune
       cancel-in-progress: false
@@ -96,7 +75,6 @@ jobs:
     secrets: inherit
 
   memorydb:
-    if: github.event.schedule == '8,23,38,53 * * * *'
     concurrency:
       group: publish-memorydb
       cancel-in-progress: false
@@ -106,7 +84,6 @@ jobs:
     secrets: inherit
 
   dax:
-    if: github.event.schedule == '9,24,39,54 * * * *'
     concurrency:
       group: publish-dax
       cancel-in-progress: false
@@ -116,7 +93,6 @@ jobs:
     secrets: inherit
 
   sagemaker:
-    if: github.event.schedule == '11,26,41,56 * * * *'
     concurrency:
       group: publish-sagemaker
       cancel-in-progress: false
@@ -126,7 +102,6 @@ jobs:
     secrets: inherit
 
   emr:
-    if: github.event.schedule == '12,27,42,57 * * * *'
     concurrency:
       group: publish-emr
       cancel-in-progress: false
@@ -136,7 +111,6 @@ jobs:
     secrets: inherit
 
   gamelift:
-    if: github.event.schedule == '13,28,43,58 * * * *'
     concurrency:
       group: publish-gamelift
       cancel-in-progress: false
