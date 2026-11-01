@@ -1,6 +1,6 @@
 # instances-bundler
 
-Compresses AWS price list files (`index.json` from the AWS Price List bulk API) into one small JSON file per offer. The file keeps the history of every instance's attributes, on-demand prices and reserved prices across many files.
+Compresses AWS price list files (`index.json` from the AWS Price List bulk API) into one small JSON file per offer. The file keeps the history of every instance's attributes, on-demand prices and reserved prices across many files. It also keeps a history of EC2 spot prices in the same format (see [Spot prices](#spot-prices)).
 
 A 1.5 GB AWS EC2 file becomes about 30.5 MB of minified JSON (5.4 MB gzipped). Each later file adds only the rows that changed.
 
@@ -20,6 +20,7 @@ Supported offers, all priced per instance type:
 | sagemaker | `AmazonSageMaker` | component, platoinstancetype, usagetype |
 | emr | `ElasticMapReduce` | softwareType, usagetype |
 | gamelift | `AmazonGameLift` | operatingSystem, isSpotInstance, operation, usagetype |
+| spot | `AmazonEC2Spot` | operatingSystem |
 
 The tool reads the offer from the file's `offerCode`, so there is no flag for it. Offers are configured in `offers.go`. Each offer's keys were picked so that no two products in one region share a price key in any published version. The exceptions are a few AWS mislabels in old SageMaker files, where one price is kept.
 
@@ -54,18 +55,36 @@ Append files oldest first, and only files for the bundle's offer. `append` rejec
 
 `-host-suffix` (default `.host`) is added to EC2 Dedicated Host names. AWS names hosts by family (`m5`), and `.metal` would collide with real bare-metal instances such as `m5.metal`. Use the same suffix for every append to a bundle.
 
+## Spot prices
+
+AWS has no price list for EC2 spot prices, and its spot price history API needs an AWS account and only goes back 90 days. Spot bundles are instead built from [`spot.json`](https://website.spot.ec2.aws.a2z.com/spot.json), the feed behind AWS's Spot pricing page, which holds the current price of every instance type per region for Linux and Windows. A spot bundle records the offer `AmazonEC2Spot`, which is not a real AWS offer code. Its spot prices are stored as on-demand rows, with `operatingSystem` (`Linux` or `Windows`) as the only variant key, and it has no reserved prices or instance attributes.
+
+The feed has no publication date, so `compress` and `append` date it by the file's modification time, or by `-published <RFC 3339 time>` (required when reading the feed from stdin). `./spot.sh [spot-bundle.json]` downloads the feed with its `Last-Modified` time and adds it to the bundle, creating it if needed. It exits successfully without changing anything if the feed hasn't changed since the bundle's latest version.
+
+There are no older versions of the feed to download. To start a spot bundle with history, build it with `seed-spot.sh` on a machine with AWS credentials, then publish it:
+
+```sh
+AWS_PROFILE=spot-history ./seed-spot.sh spot-bundle.json
+SEED_BUNDLE=spot-bundle.json R2_BUCKET=my-bucket R2_ACCOUNT_ID=abc123 \
+AWS_ACCESS_KEY_ID=... AWS_SECRET_ACCESS_KEY=... ./publish-spot.sh
+```
+
+`seed-spot.sh` fetches the last 90 days (the most EC2 keeps) of `DescribeSpotPriceHistory` for every region enabled in the account, Linux and Windows only. The credentials need `ec2:DescribeRegions` and `ec2:DescribeSpotPriceHistory`. The pages are saved in `spot-history/`, so an interrupted fetch resumes where it stopped. Running it again later tops each region up with the history since its last fetch and rebuilds the bundle with the current feed, so a bundle that wasn't published straight away loses nothing. The history is per availability zone, so `instances-bundler spot-history` combines each region's zones into one price (the lowest, or `AGGREGATE=max|mean|median`) and prints how well each way matches the current feed. It then adds a snapshot for each hour in which prices changed, each row dated by when its price actually changed, and adds the feed last.
+
+`SEED_BUNDLE` makes `publish-offer.sh` start from that bundle instead of building one, but only when the bucket has no `<prefix>latest` yet (or with `RESEED=1`). History is older than any published spot bundle's latest prices, so it can only start a new bundle. Without `SEED_BUNDLE`, the first `publish-spot.sh` run starts the history from the current feed. Either way, `RESEED=1` throws away everything collected since. The feed's regions are region codes (`us-east-1`, and Local Zones such as `us-east-1-atl-1`), not the location names (`US East (N. Virginia)`) other bundles use, so a spot bundle's `regions` table is empty.
+
 Products without an `instanceType` (data transfer, EBS, IPs, load balancers, storage, and so on) are dropped, as are a few families that have one but aren't priced per instance hour (Redshift concurrency scaling and managed storage, DocumentDB CPU credits).
 
 ## Publishing
 
-`publish-<platform>.sh` keeps one platform's bundle up to date in a Cloudflare R2 bucket. Each script calls `publish-offer.sh <offer> <prefix>`. All platforms share one bucket and are kept apart by a key prefix:
+`publish-<platform>.sh` keeps one platform's bundle up to date in a Cloudflare R2 bucket. Each script calls `publish-offer.sh <offer> <prefix> [update-script]`, where the update script is `seed.sh` for every platform but spot, which uses `spot.sh`. All platforms share one bucket and are kept apart by a key prefix:
 
 | Platform | Keys |
 | --- | --- |
 | ec2 | `latest`, `bundle-<timestamp>.json.xz` |
-| rds, elasticache, … | `<platform>-latest`, `<platform>-bundle-<timestamp>.json.xz` (e.g. `rds-latest`) |
+| rds, elasticache, …, spot | `<platform>-latest`, `<platform>-bundle-<timestamp>.json.xz` (e.g. `rds-latest`) |
 
-EC2 keeps its unprefixed keys because they were in use before the other platforms were added. `<prefix>latest` holds a timestamp. The script downloads the bundle it points at, runs `seed.sh` on it, and if anything was added uploads it as a new `<prefix>bundle-<now>.json.xz` before moving `<prefix>latest`.
+EC2 keeps its unprefixed keys because they were in use before the other platforms were added. `<prefix>latest` holds a timestamp. The script downloads the bundle it points at, runs the update script on it, and if anything was added uploads it as a new `<prefix>bundle-<now>.json.xz` before moving `<prefix>latest`.
 
 ```sh
 R2_BUCKET=my-bucket R2_ACCOUNT_ID=abc123 \
@@ -74,7 +93,7 @@ AWS_ACCESS_KEY_ID=... AWS_SECRET_ACCESS_KEY=... ./publish-rds.sh
 
 If the bucket has no `<prefix>latest`, the script seeds a new bundle from scratch. For EC2 that is a 400 GB seed, so seed EC2 from a machine that already has a bundle rather than from CI. The other platforms can seed from scratch in CI on their first run. To rebuild an existing bundle from scratch, for example after changing an offer's `variant_keys` (which makes the old bundle unreadable), run its script with `RESEED=1`. That publishes a new bundle and moves `<prefix>latest` to it, leaving the old bundles in the bucket. `publish-script.yml` has a matching `reseed` input.
 
-`.github/workflows/publish.yml` has one cron and one job per platform: EC2 every 5 minutes, and the others every 15 minutes at staggered offsets. All run on `ubuntu-24.04-arm`. Each job runs the steps in `publish-script.yml`, and only one run per platform happens at a time. The jobs read the repository variables `R2_BUCKET` and `R2_ACCOUNT_ID`, and the secrets `R2_ACCESS_KEY_ID` and `R2_SECRET_ACCESS_KEY` (an R2 API token with read and write access to the bucket).
+`.github/workflows/publish.yml` has one cron and one job per platform: EC2 every 5 minutes, spot every 6 hours, and the others every 15 minutes at staggered offsets. Spot prices change about hourly and every change uploads the whole bundle (about 21 MB) again, so spot runs less often; between runs, only the feed's latest prices are kept, so the spot history after the seed has a price every 6 hours rather than every hour. All run on `ubuntu-24.04-arm`. Each job runs the steps in `publish-script.yml`, and only one run per platform happens at a time. The jobs read the repository variables `R2_BUCKET` and `R2_ACCOUNT_ID`, and the secrets `R2_ACCESS_KEY_ID` and `R2_SECRET_ACCESS_KEY` (an R2 API token with read and write access to the bucket).
 
 To add a platform, add its offer to `offers.go`, add a `publish-<platform>.sh`, and add a cron and a job to `publish.yml`.
 

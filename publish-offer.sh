@@ -3,16 +3,18 @@
 # The publish-<platform>.sh scripts call this with their offer and prefix.
 #
 # The bucket holds `<prefix>latest`, whose contents are a timestamp, and `<prefix>bundle-<timestamp>.json.xz`
-# for each published bundle. This downloads the bundle `<prefix>latest` points at, runs seed.sh on it, and if
-# seed.sh changed it uploads it as <prefix>bundle-<now>.json.xz and then points `<prefix>latest` at <now>.
-# When the bucket has no `<prefix>latest` yet, seed.sh builds a bundle from scratch (a full EC2 seed
-# downloads ~400 GB; the other offers are far smaller).
+# for each published bundle. This downloads the bundle `<prefix>latest` points at, runs the update script
+# (seed.sh) on it, and if that changed it uploads it as <prefix>bundle-<now>.json.xz and then points
+# `<prefix>latest` at <now>. When the bucket has no `<prefix>latest` yet, the update script builds a bundle
+# from scratch (a full EC2 seed downloads ~400 GB; the other offers are far smaller).
 #
 #   R2_BUCKET=my-bucket R2_ACCOUNT_ID=abc123 ./publish-offer.sh AmazonRDS rds-
 #
 # Arguments:
 #   offer   AWS offer code, such as AmazonEC2 or AmazonRDS
 #   prefix  put before every key in the bucket; empty for EC2, whose keys predate the other offers
+#   update  script in this directory that updates the bundle, given its path (default seed.sh); spot prices
+#           use spot.sh, since they have no price list versions to seed from
 #
 # Environment:
 #   R2_BUCKET      bucket name (required)
@@ -22,17 +24,20 @@
 #   TMPDIR         where the bundle and seed.sh's downloads go
 #   RESEED         set to 1 to build a new bundle from scratch even if the bucket has one, such as after an
 #                  offer's variant keys change; older bundles are left in the bucket
+#   SEED_BUNDLE    a bundle built on this machine (such as by seed-spot.sh) to start from instead of
+#                  building one from scratch; only when the bucket has no `<prefix>latest` or RESEED is 1
 # Any other variable seed.sh reads (MAX_VERSIONS, HOST_SUFFIX) is passed through.
 set -euo pipefail
 
-if [[ $# -ne 2 ]]; then
-  echo "usage: publish-offer.sh <offer> <prefix>" >&2
+if [[ $# -lt 2 || $# -gt 3 ]]; then
+  echo "usage: publish-offer.sh <offer> <prefix> [update-script]" >&2
   exit 2
 fi
 offer="$1"
 prefix="$2"
-if [[ ! "$offer" =~ ^[A-Za-z0-9]+$ || ! "$prefix" =~ ^[a-z0-9-]*$ ]]; then
-  echo "publish: bad offer '$offer' or prefix '$prefix'" >&2
+update="${3:-seed.sh}"
+if [[ ! "$offer" =~ ^[A-Za-z0-9]+$ || ! "$prefix" =~ ^[a-z0-9-]*$ || ! "$update" =~ ^[a-z0-9-]+\.sh$ ]]; then
+  echo "publish: bad offer '$offer', prefix '$prefix' or update script '$update'" >&2
   exit 2
 fi
 
@@ -79,9 +84,17 @@ bundle="$work/bundle.json"
 
 latest="${prefix}latest"
 before=""
+if [[ -n "${SEED_BUNDLE:-}" && ! -f "$SEED_BUNDLE" ]]; then
+  echo "publish: SEED_BUNDLE $SEED_BUNDLE does not exist" >&2
+  exit 1
+fi
 if [[ "${RESEED:-}" == 1 ]]; then
   echo "publish: RESEED is set, building a new $offer bundle from scratch" >&2
 elif exists "$latest"; then
+  if [[ -n "${SEED_BUNDLE:-}" ]]; then
+    echo "publish: $bucket already has $latest; set RESEED=1 to replace it with SEED_BUNDLE" >&2
+    exit 1
+  fi
   r2 s3 cp --only-show-errors "s3://$bucket/$latest" "$work/latest"
   ts="$(tr -d '[:space:]' < "$work/latest")"
   if [[ ! "$ts" =~ ^[A-Za-z0-9._-]+$ ]]; then
@@ -103,7 +116,16 @@ else
   echo "publish: $bucket has no $latest, seeding a new $offer bundle" >&2
 fi
 
-OFFER="$offer" "$here/seed.sh" "$bundle"
+if [[ -n "${SEED_BUNDLE:-}" ]]; then
+  if ! jq -e --arg offer "$offer" '(.offer // "AmazonEC2") == $offer' "$SEED_BUNDLE" >/dev/null; then
+    echo "publish: SEED_BUNDLE $SEED_BUNDLE is not a $offer bundle" >&2
+    exit 1
+  fi
+  echo "publish: starting from $SEED_BUNDLE" >&2
+  cp "$SEED_BUNDLE" "$bundle"
+fi
+
+OFFER="$offer" "$here/$update" "$bundle"
 
 after="$(sha256 "$bundle")"
 if [[ "$after" == "$before" ]]; then

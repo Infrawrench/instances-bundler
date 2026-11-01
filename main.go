@@ -5,26 +5,33 @@ import (
 	"errors"
 	"flag"
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 )
 
-const usage = `instances-bundler compresses AWS price list files (EC2, RDS, ElastiCache, ...) into one small history file per offer.
+const usage = `instances-bundler compresses AWS price list files (EC2, RDS, ElastiCache, ...) and EC2 spot price
+feeds into one small history file per offer.
 
 Usage:
-  instances-bundler compress [-host-suffix .host] -o <bundle.json> <aws-pricing.json|->
-  instances-bundler append   [-host-suffix .host] [-o <out.json>] <bundle.json> <aws-pricing.json|->
+  instances-bundler compress [-host-suffix .host] [-published <time>] -o <bundle.json> <aws-pricing.json|->
+  instances-bundler append   [-host-suffix .host] [-published <time>] [-o <out.json>] <bundle.json> <aws-pricing.json|->
   instances-bundler upgrade  [-o <out.json>] <bundle.json>
+  instances-bundler spot-history [-aggregate min] [-interval 1h] [-published <time>] -start <time> -o <bundle.json> <spot.json> <history-dir>
 
 compress  builds a new bundle from one AWS pricing file.
 append    adds a newer AWS pricing file to an existing bundle, recording only what changed.
           The bundle is rewritten in place unless -o is given. Exits with status 3 if the
           file is not newer than the bundle's latest one.
 upgrade   rewrites a bundle made by an older version in the current format.
+spot-history  builds a new spot bundle from EC2's spot price history, as seed-spot.sh saves it in
+          history-dir, from -start up to when spot.json was published, then adds spot.json itself.
 
 Use - to read the AWS pricing file from stdin.
+
+A spot price feed (spot.json) has no publication date, so -published gives it as an RFC 3339 time.
+Without -published, the feed file's modification time is used.
 `
 
 func main() {
@@ -40,6 +47,8 @@ func main() {
 		err = runAppend(os.Args[2:])
 	case "upgrade":
 		err = runUpgrade(os.Args[2:])
+	case "spot-history":
+		err = runSpotHistory(os.Args[2:])
 	case "help", "-h", "-help", "--help":
 		fmt.Print(usage)
 		return
@@ -60,14 +69,15 @@ func runCompress(args []string) error {
 	fs := flag.NewFlagSet("compress", flag.ContinueOnError)
 	out := fs.String("o", "", "output bundle file (required)")
 	suffix := fs.String("host-suffix", ".host", "suffix added to Dedicated Host names so they don't collide with instance types")
+	published := fs.String("published", "", "when a spot price feed was published, as an RFC 3339 time (default: the file's modification time)")
 	pos, err := parseArgs(fs, args)
 	if err != nil {
 		return err
 	}
 	if len(pos) != 1 || *out == "" {
-		return fmt.Errorf("usage: instances-bundler compress [-host-suffix .host] -o <bundle.json> <aws-pricing.json|->")
+		return fmt.Errorf("usage: instances-bundler compress [-host-suffix .host] [-published <time>] -o <bundle.json> <aws-pricing.json|->")
 	}
-	snap, err := loadSnapshot(pos[0], *suffix)
+	snap, err := loadSnapshot(pos[0], *suffix, *published)
 	if err != nil {
 		return err
 	}
@@ -84,12 +94,13 @@ func runAppend(args []string) error {
 	fs := flag.NewFlagSet("append", flag.ContinueOnError)
 	out := fs.String("o", "", "output bundle file (default: rewrite the input bundle)")
 	suffix := fs.String("host-suffix", ".host", "suffix added to Dedicated Host names; use the one the bundle was made with")
+	published := fs.String("published", "", "when a spot price feed was published, as an RFC 3339 time (default: the file's modification time)")
 	pos, err := parseArgs(fs, args)
 	if err != nil {
 		return err
 	}
 	if len(pos) != 2 {
-		return fmt.Errorf("usage: instances-bundler append [-host-suffix .host] [-o <out.json>] <bundle.json> <aws-pricing.json|->")
+		return fmt.Errorf("usage: instances-bundler append [-host-suffix .host] [-published <time>] [-o <out.json>] <bundle.json> <aws-pricing.json|->")
 	}
 	if *out == "" {
 		*out = pos[0]
@@ -98,7 +109,7 @@ func runAppend(args []string) error {
 	if err != nil {
 		return err
 	}
-	snap, err := loadSnapshot(pos[1], *suffix)
+	snap, err := loadSnapshot(pos[1], *suffix, *published)
 	if err != nil {
 		return err
 	}
@@ -127,6 +138,63 @@ func runUpgrade(args []string) error {
 	if err != nil {
 		return err
 	}
+	return writeBundle(*out, b)
+}
+
+func runSpotHistory(args []string) error {
+	fs := flag.NewFlagSet("spot-history", flag.ContinueOnError)
+	out := fs.String("o", "", "output bundle file (required); must not exist yet")
+	startFlag := fs.String("start", "", "when the history starts, as an RFC 3339 time (required)")
+	published := fs.String("published", "", "when spot.json was published, as an RFC 3339 time (default: the file's modification time)")
+	aggregate := fs.String("aggregate", "min", "how availability zone prices become a region price: "+strings.Join(spotAggregateNames, ", "))
+	interval := fs.Duration("interval", time.Hour, "at most one snapshot per interval; each price row still has its own time")
+	pos, err := parseArgs(fs, args)
+	if err != nil {
+		return err
+	}
+	if len(pos) != 2 || *out == "" || *startFlag == "" || *interval < time.Second {
+		return fmt.Errorf("usage: instances-bundler spot-history [-aggregate min] [-interval 1h] [-published <time>] -start <time> -o <bundle.json> <spot.json> <history-dir>")
+	}
+	if _, err := os.Stat(*out); err == nil {
+		return fmt.Errorf("%s already exists; spot-history only builds new bundles, since history is older than any bundle's latest prices", *out)
+	}
+	start, err := parseTS(*startFlag)
+	if err != nil {
+		return fmt.Errorf("-start: %w", err)
+	}
+	feed, err := loadSnapshot(pos[0], "", *published)
+	if err != nil {
+		return err
+	}
+	if feed.Offer != spotOffer {
+		return fmt.Errorf("%s is not a spot price feed", pos[0])
+	}
+	if feed.TS <= start {
+		return fmt.Errorf("-start %s is not before the feed's publication time %s", fmtTS(start), fmtTS(feed.TS))
+	}
+	began := time.Now()
+	h, err := readSpotHistory(pos[1], start, feed.TS, *aggregate)
+	if err != nil {
+		return err
+	}
+	if len(h.Events) == 0 {
+		return fmt.Errorf("%s has no spot price history between %s and %s", pos[1], fmtTS(start), fmtTS(feed.TS))
+	}
+	fmt.Fprintf(os.Stderr, "read %s: %d spot price records, %d region price changes (%s)\n",
+		pos[1], h.Records, len(h.Events), time.Since(began).Round(time.Second))
+	fmt.Fprint(os.Stderr, compareSpot(h, feed, *aggregate))
+
+	b := &Bundle{Instances: map[string]*Instance{}}
+	st, n, err := appendSpotHistory(b, h, start, feed.TS, int64(interval.Seconds()))
+	if err != nil {
+		return err
+	}
+	fmt.Fprintf(os.Stderr, "history: %d snapshots from %s, %d instance types, %d price rows\n", n, fmtTS(start), st.Created, st.ODRows)
+	if st, err = b.Append(feed); err != nil {
+		return err
+	}
+	fmt.Fprint(os.Stderr, "feed: ")
+	report(st)
 	return writeBundle(*out, b)
 }
 
@@ -166,18 +234,32 @@ func parseArgs(fs *flag.FlagSet, args []string) ([]string, error) {
 	}
 }
 
-func loadSnapshot(path, hostSuffix string) (*snapshot, error) {
-	var r io.Reader = os.Stdin
+func loadSnapshot(path, hostSuffix, published string) (*snapshot, error) {
+	var in *os.File = os.Stdin
 	if path != "-" {
 		f, err := os.Open(path)
 		if err != nil {
 			return nil, err
 		}
 		defer f.Close()
-		r = f
+		in = f
 	}
 	start := time.Now()
-	snap, err := readAWS(r, hostSuffix)
+	r := bufio.NewReaderSize(in, 4<<20)
+	head, _ := r.Peek(4096)
+	var snap *snapshot
+	var err error
+	if isSpotFeed(head) {
+		var ts int64
+		ts, err = spotPublished(in, published)
+		if err == nil {
+			snap, err = readSpot(r, ts)
+		}
+	} else if published != "" {
+		err = fmt.Errorf("-published is only for spot price feeds; price lists have their own publicationDate")
+	} else {
+		snap, err = readAWS(r, hostSuffix)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("%s: %w", path, err)
 	}
@@ -187,6 +269,25 @@ func loadSnapshot(path, hostSuffix string) (*snapshot, error) {
 		fmt.Fprintf(os.Stderr, "warning: %d prices shared a key with another product and only one was kept\n", snap.Collisions)
 	}
 	return snap, nil
+}
+
+// spotPublished is when a spot price feed was published: the -published time, or else the file's modification time.
+func spotPublished(f *os.File, published string) (int64, error) {
+	if published != "" {
+		ts, err := parseTS(published)
+		if err != nil {
+			return 0, fmt.Errorf("-published: %w", err)
+		}
+		return ts, nil
+	}
+	info, err := f.Stat()
+	if err != nil {
+		return 0, err
+	}
+	if !info.Mode().IsRegular() {
+		return 0, fmt.Errorf("a spot price feed read from a pipe needs -published")
+	}
+	return info.ModTime().Unix(), nil
 }
 
 func report(st AppendStats) {

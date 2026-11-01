@@ -71,6 +71,8 @@ var offers = map[string]Offer{
 	"ElasticMapReduce": {VariantKeys: []string{"softwareType", "usagetype"}},
 	// operation tells apart FleetIQ and GameLift-managed instances.
 	"AmazonGameLift": {VariantKeys: []string{"operatingSystem", "isSpotInstance", "operation", "usagetype"}},
+	// EC2 spot prices, read from AWS's spot price feed rather than a price list (see spot.go).
+	spotOffer: {VariantKeys: []string{"operatingSystem"}},
 }
 
 // offerAttrs are per-SKU identifiers and the location; none of them describe the instance itself.

@@ -1,3 +1,5 @@
 /instances-bundler
 bundle.json
 *.json.xz
+spot-history/
+spot-bundle.json

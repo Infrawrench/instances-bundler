@@ -18,6 +18,8 @@ on:
     - cron: "11,26,41,56 * * * *" # sagemaker
     - cron: "12,27,42,57 * * * *" # emr
     - cron: "13,28,43,58 * * * *" # gamelift
+    # Spot every 6 hours: its prices change hourly, and each change uploads the whole bundle again.
+    - cron: "14 */6 * * *" # spot
 
 permissions:
   contents: read
@@ -143,4 +145,14 @@ jobs:
     uses: ./.github/workflows/publish-script.yml
     with:
       script: publish-gamelift.sh
+    secrets: inherit
+
+  spot:
+    if: github.event.schedule == '14 */6 * * *'
+    concurrency:
+      group: publish-spot
+      cancel-in-progress: false
+    uses: ./.github/workflows/publish-script.yml
+    with:
+      script: publish-spot.sh
     secrets: inherit
