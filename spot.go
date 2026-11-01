@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"regexp"
 	"strconv"
 	"strings"
 )
@@ -16,6 +17,27 @@ const spotOffer = "AmazonEC2Spot"
 
 // spotOS names the feed's price columns the way EC2 price lists spell operatingSystem.
 var spotOS = map[string]string{"linux": "Linux", "mswin": "Windows"}
+
+var (
+	// localZone matches a Local Zone group's code: its parent region's code, then a city and a number.
+	localZone = regexp.MustCompile(`^[a-z]{2}-[a-z]+-\d+-[a-z]+-\d+$`)
+	// wavelengthZone matches a Wavelength Zone group's code, such as us-east-1-wl1.
+	wavelengthZone = regexp.MustCompile(`-wl\d+(-|$)`)
+)
+
+// spotRegionAttrs are the regions table's attributes for a spot location, which the feed and spot price
+// history name by code. They match what price lists give their locations, so every bundle's regions table
+// has regionCode and locationType.
+func spotRegionAttrs(code string) map[string]string {
+	kind := "AWS Region"
+	switch {
+	case wavelengthZone.MatchString(code):
+		kind = "AWS Wavelength Zone"
+	case localZone.MatchString(code):
+		kind = "AWS Local Zone"
+	}
+	return map[string]string{"regionCode": code, "locationType": kind}
+}
 
 type spotFeed struct {
 	Config struct {
@@ -46,7 +68,8 @@ func isSpotFeed(head []byte) bool {
 }
 
 // readSpot reads AWS's spot price feed. The feed has no publication date, so ts says when it was published.
-// Its regions are region codes (us-east-1), not the location names (US East (N. Virginia)) price lists use.
+// Its locations are region codes (us-east-1), not the location names (US East (N. Virginia)) price lists use;
+// the regions table gives each its own code as regionCode, and its locationType.
 func readSpot(r io.Reader, ts int64) (*snapshot, error) {
 	var feed spotFeed
 	if err := json.NewDecoder(bufio.NewReaderSize(r, 4<<20)).Decode(&feed); err != nil {
@@ -61,6 +84,7 @@ func readSpot(r io.Reader, ts int64) (*snapshot, error) {
 		if reg.Region == "" {
 			return nil, fmt.Errorf("spot price feed has a region with no name")
 		}
+		s.Regions[reg.Region] = spotRegionAttrs(reg.Region)
 		// The feed lists some instance types twice in a region, under the same category with the same prices.
 		for _, group := range reg.InstanceTypes {
 			for _, size := range group.Sizes {

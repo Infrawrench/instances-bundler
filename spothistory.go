@@ -200,6 +200,7 @@ func readGzipJSON(path string, v any) error {
 func appendSpotHistory(b *Bundle, h *spotHistory, start, end, interval int64) (AppendStats, int, error) {
 	var total AppendStats
 	state := map[string]*snapInstance{}
+	regions := map[string]map[string]string{}
 	n, i := 0, 0
 	for t := start; i < len(h.Events); t += interval {
 		boundary := min(t, end-1)
@@ -212,13 +213,16 @@ func appendSpotHistory(b *Bundle, h *spotHistory, start, end, interval int64) (A
 				state[e.Name] = si
 			}
 			si.OD[e.Key] = odPrice{Eff: e.TS, Price: e.Price}
+			if regions[e.Key.Region] == nil {
+				regions[e.Key.Region] = spotRegionAttrs(e.Key.Region)
+			}
 			applied = true
 		}
 		if !applied {
 			continue
 		}
 		// Append only reads the snapshot, so it can share the state's maps.
-		s := &snapshot{Offer: spotOffer, TS: boundary, Instances: state, Regions: map[string]map[string]string{}}
+		s := &snapshot{Offer: spotOffer, TS: boundary, Instances: state, Regions: regions}
 		st, err := b.Append(s)
 		if err != nil {
 			return total, n, err

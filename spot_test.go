@@ -73,7 +73,7 @@ func TestSpot(t *testing.T) {
 	if got := nov.Instances["t4g.nano"].OD[odKey{"us-east-1", Variant{"Linux"}}].Price; got != 0.0005 {
 		t.Errorf("t4g.nano price %v, want 0.0005", got)
 	}
-	b := appendOK(t, &Bundle{Instances: map[string]*Instance{}}, nov, AppendStats{Created: 2, ODRows: 4})
+	b := appendOK(t, &Bundle{Instances: map[string]*Instance{}}, nov, AppendStats{Created: 2, ODRows: 4, RegionChanges: 4})
 	if b.Offer != spotOffer {
 		t.Errorf("offer %q, want %s", b.Offer, spotOffer)
 	}
@@ -215,10 +215,26 @@ func TestSpotHistory(t *testing.T) {
 		}
 	}
 	// c5.large gets a Linux price, eu-west-1 is new, and the Local Zone price the feed lacks is removed.
-	appendOK(t, b, feed, AppendStats{ODRows: 3})
+	appendOK(t, b, feed, AppendStats{ODRows: 3, RegionChanges: 2})
 
 	writeHistory(t, dir, "eu-west-1", false, []spotHistoryRecord{rec("eu-west-1a", "m5.large", "Linux/UNIX", "0.04", "2026-08-02T00:00:00Z")})
 	if _, err := readSpotHistory(dir, start, end, "min"); err == nil {
 		t.Error("a region that was not fetched completely should be an error")
+	}
+}
+
+func TestSpotRegionAttrs(t *testing.T) {
+	for code, want := range map[string]string{
+		"us-east-1":               "AWS Region",
+		"ap-southeast-7":          "AWS Region",
+		"us-east-1-atl-1":         "AWS Local Zone",
+		"ap-southeast-1-han-1":    "AWS Local Zone",
+		"us-east-1-wl1":           "AWS Wavelength Zone",
+		"us-east-1-wl1-bos-wlz-1": "AWS Wavelength Zone",
+	} {
+		got := spotRegionAttrs(code)
+		if got["locationType"] != want || got["regionCode"] != code {
+			t.Errorf("spotRegionAttrs(%q) = %v, want locationType %q", code, got, want)
+		}
 	}
 }
