@@ -4,6 +4,13 @@ Compresses AWS price list files (`index.json` from the AWS Price List bulk API) 
 
 A 1.5 GB AWS EC2 file becomes about 30.5 MB of minified JSON (5.4 MB gzipped). Each later file adds only the rows that changed.
 
+The repository has two tools that write the same bundle format into the same bucket:
+
+- `aws/`: this tool, for AWS offers. Everything below describes it unless it says otherwise.
+- `other/`: `other-instances`, for other clouds: RunPod GPU and CPU pods (`runpod`) and Alibaba Cloud ECS (`alibaba`). See [other/README.md](other/README.md).
+
+The publish scripts for every platform are at the top level (see [Publishing](#publishing)).
+
 Supported offers, all priced per instance type:
 
 | Platform | Offer code | Fields that pick a price (`variant_keys`) |
@@ -22,11 +29,12 @@ Supported offers, all priced per instance type:
 | gamelift | `AmazonGameLift` | operatingSystem, isSpotInstance, operation, usagetype |
 | spot | `AmazonEC2Spot` | operatingSystem |
 
-The tool reads the offer from the file's `offerCode`, so there is no flag for it. Offers are configured in `offers.go`. Each offer's keys were picked so that no two products in one region share a price key in any published version. The exceptions are a few AWS mislabels in old SageMaker files, where one price is kept.
+The tool reads the offer from the file's `offerCode`, so there is no flag for it. Offers are configured in `aws/offers.go`. Each offer's keys were picked so that no two products in one region share a price key in any published version. The exceptions are a few AWS mislabels in old SageMaker files, where one price is kept.
 
 ## Usage
 
 ```sh
+cd aws
 go build -o instances-bundler .
 
 # Start a bundle from one AWS pricing file
@@ -43,7 +51,7 @@ curl -s https://pricing.us-east-1.amazonaws.com/offers/v1.0/aws/AmazonEC2/curren
 ./instances-bundler upgrade bundle.json
 ```
 
-To build a bundle from every published version of an offer's price list, run `./seed.sh [bundle.json]`, with `OFFER=AmazonRDS` (or another offer code) for anything but EC2. The first version creates the bundle and the rest are appended. Re-running it skips versions the bundle already has, so it can be stopped and resumed.
+To build a bundle from every published version of an offer's price list, run `aws/seed.sh [bundle.json]`, with `OFFER=AmazonRDS` (or another offer code) for anything but EC2. The first version creates the bundle and the rest are appended. Re-running it skips versions the bundle already has, so it can be stopped and resumed.
 
 A version's ID is usually its `publicationDate`, but not always: `20190828220000` was published at `2019-08-28T20:49:02Z`. So for versions near the bundle's latest, the script reads the real date from the first 4 KB of the file before downloading the rest.
 
@@ -59,12 +67,12 @@ Append files oldest first, and only files for the bundle's offer. `append` rejec
 
 AWS has no price list for EC2 spot prices, and its spot price history API needs an AWS account and only goes back 90 days. Spot bundles are instead built from [`spot.json`](https://website.spot.ec2.aws.a2z.com/spot.json), the feed behind AWS's Spot pricing page, which holds the current price of every instance type per region for Linux and Windows. A spot bundle records the offer `AmazonEC2Spot`, which is not a real AWS offer code. Its spot prices are stored as on-demand rows, with `operatingSystem` (`Linux` or `Windows`) as the only variant key, and it has no reserved prices or instance attributes.
 
-The feed has no publication date, so `compress` and `append` date it by the file's modification time, or by `-published <RFC 3339 time>` (required when reading the feed from stdin). `./spot.sh [spot-bundle.json]` downloads the feed with its `Last-Modified` time and adds it to the bundle, creating it if needed. It exits successfully without changing anything if the feed hasn't changed since the bundle's latest version.
+The feed has no publication date, so `compress` and `append` date it by the file's modification time, or by `-published <RFC 3339 time>` (required when reading the feed from stdin). `aws/spot.sh [spot-bundle.json]` downloads the feed with its `Last-Modified` time and adds it to the bundle, creating it if needed. It exits successfully without changing anything if the feed hasn't changed since the bundle's latest version.
 
-There are no older versions of the feed to download. To start a spot bundle with history, build it with `seed-spot.sh` on a machine with AWS credentials, then publish it:
+There are no older versions of the feed to download. To start a spot bundle with history, build it with `aws/seed-spot.sh` on a machine with AWS credentials, then publish it:
 
 ```sh
-AWS_PROFILE=spot-history ./seed-spot.sh spot-bundle.json
+AWS_PROFILE=spot-history aws/seed-spot.sh spot-bundle.json
 SEED_BUNDLE=spot-bundle.json R2_BUCKET=my-bucket R2_ACCOUNT_ID=abc123 \
 AWS_ACCESS_KEY_ID=... AWS_SECRET_ACCESS_KEY=... ./publish-spot.sh
 ```
@@ -77,12 +85,12 @@ Products without an `instanceType` (data transfer, EBS, IPs, load balancers, sto
 
 ## Publishing
 
-`publish-<platform>.sh` keeps one platform's bundle up to date in a Cloudflare R2 bucket. Each script calls `publish-offer.sh <offer> <prefix> [update-script]`, where the update script is `seed.sh` for every platform but spot, which uses `spot.sh`. All platforms share one bucket and are kept apart by a key prefix:
+`publish-<platform>.sh` keeps one platform's bundle up to date in a Cloudflare R2 bucket. Each script calls `publish-offer.sh <offer> <prefix> [update-script]`, where the update script is `aws/seed.sh` for every AWS platform but spot, which uses `aws/spot.sh`; RunPod and Alibaba use `other/update-runpod.sh` and `other/update-alibaba.sh`. All platforms share one bucket and are kept apart by a key prefix:
 
 | Platform | Keys |
 | --- | --- |
 | ec2 | `latest`, `bundle-<timestamp>.json.xz` |
-| rds, elasticache, …, spot | `<platform>-latest`, `<platform>-bundle-<timestamp>.json.xz` (e.g. `rds-latest`) |
+| rds, elasticache, …, spot, runpod, alibaba | `<platform>-latest`, `<platform>-bundle-<timestamp>.json.xz` (e.g. `rds-latest`) |
 
 EC2 keeps its unprefixed keys because they were in use before the other platforms were added. `<prefix>latest` holds a timestamp. The script downloads the bundle it points at, runs the update script on it, and if anything was added uploads it as a new `<prefix>bundle-<now>.json.xz` before moving `<prefix>latest`.
 
@@ -91,11 +99,11 @@ R2_BUCKET=my-bucket R2_ACCOUNT_ID=abc123 \
 AWS_ACCESS_KEY_ID=... AWS_SECRET_ACCESS_KEY=... ./publish-rds.sh
 ```
 
-If the bucket has no `<prefix>latest`, the script seeds a new bundle from scratch. For EC2 that is a 400 GB seed, so seed EC2 from a machine that already has a bundle rather than from CI. The other platforms can seed from scratch in CI on their first run. To rebuild an existing bundle from scratch, for example after changing an offer's `variant_keys` (which makes the old bundle unreadable), run its script with `RESEED=1`. That publishes a new bundle and moves `<prefix>latest` to it, leaving the old bundles in the bucket. `publish-script.yml` has a matching `reseed` input.
+If the bucket has no `<prefix>latest`, the script seeds a new bundle from scratch. For EC2 that is a 400 GB seed, so seed EC2 from a machine that already has a bundle rather than from CI. The other platforms can seed from scratch in CI on their first run (Alibaba downloads about 10 GB; RunPod has no history to seed). To rebuild an existing bundle from scratch, for example after changing an offer's `variant_keys` (which makes the old bundle unreadable), run its script with `RESEED=1`. That publishes a new bundle and moves `<prefix>latest` to it, leaving the old bundles in the bucket. `publish-script.yml` has a matching `reseed` input.
 
-`.github/workflows/publish.yml` has one cron and one job per platform: EC2 every 5 minutes, spot every 6 hours, and the others every 15 minutes at staggered offsets. Spot prices change about hourly and every change uploads the whole bundle (about 21 MB) again, so spot runs less often; between runs, only the feed's latest prices are kept, so the spot history after the seed has a price every 6 hours rather than every hour. All run on `ubuntu-24.04-arm`. Each job runs the steps in `publish-script.yml`, and only one run per platform happens at a time. The jobs read the repository variables `R2_BUCKET` and `R2_ACCOUNT_ID`, and the secrets `R2_ACCESS_KEY_ID` and `R2_SECRET_ACCESS_KEY` (an R2 API token with read and write access to the bucket).
+`.github/workflows/publish.yml` has one cron and one job per platform: EC2 every 5 minutes, spot and Alibaba every 6 hours, RunPod every 30 minutes, and the others every 15 minutes at staggered offsets. Spot prices change about hourly and every change uploads the whole bundle (about 21 MB) again, so spot runs less often; between runs, only the feed's latest prices are kept, so the spot history after the seed has a price every 6 hours rather than every hour. All run on `ubuntu-24.04-arm`. Each job runs the steps in `publish-script.yml` (its `go-module` input, `aws` or `other`, picks the Go version), and only one run per platform happens at a time. The jobs read the repository variables `R2_BUCKET` and `R2_ACCOUNT_ID`, and the secrets `R2_ACCESS_KEY_ID` and `R2_SECRET_ACCESS_KEY` (an R2 API token with read and write access to the bucket).
 
-To add a platform, add its offer to `offers.go`, add a `publish-<platform>.sh`, and add a cron and a job to `publish.yml`.
+To add an AWS platform, add its offer to `aws/offers.go`, add a `publish-<platform>.sh`, and add a cron and a job to `publish.yml`. Other clouds go in `other/` (see its README).
 
 ## Format
 
@@ -151,7 +159,7 @@ All strings live in `compression_table`, most used first, and everything else re
 
 ### Values that are normalized or chosen
 
-- **Attributes:** these per-product fields are left out of attributes: `location`, `usagetype`, `operation`, `instancesku`, `servicecode`, `servicename`, the variant fields, and a few per-offer fields that change with the variant rather than the instance (such as ElastiCache `year_number`; see `Dropped` in `offers.go`). `productFamily` is added as an attribute.
+- **Attributes:** these per-product fields are left out of attributes: `location`, `usagetype`, `operation`, `instancesku`, `servicecode`, `servicename`, the variant fields, and a few per-offer fields that change with the variant rather than the instance (such as ElastiCache `year_number`; see `Dropped` in `aws/offers.go`). `productFamily` is added as an attribute.
 - **usagetype variant:** for every offer but EC2, the variant's `usagetype` has the region prefix and everything from `:` on removed. So `APS3-InstanceUsage:db.r5.large` is stored as `InstanceUsage`, and one usage is one variant in every region.
 - **Region attributes:** `regionCode` and `locationType` describe the location, not the instance, so they're stored once per region in `regions` instead of as overrides on every instance. Older files without `regionCode` simply leave it out for that region.
 - **Disagreeing products:** when products in one region disagree on an attribute, the value most of them have is kept.

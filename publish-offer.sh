@@ -1,20 +1,21 @@
 #!/usr/bin/env bash
-# Updates the bundle for one AWS offer stored in R2 with any price list versions published since it was built.
-# The publish-<platform>.sh scripts call this with their offer and prefix.
+# Updates the bundle for one offer stored in R2 with whatever its provider has published since it was built.
+# The publish-<platform>.sh scripts call this with their offer, prefix and update script.
 #
 # The bucket holds `<prefix>latest`, whose contents are a timestamp, and `<prefix>bundle-<timestamp>.json.xz`
 # for each published bundle. This downloads the bundle `<prefix>latest` points at, runs the update script
-# (seed.sh) on it, and if that changed it uploads it as <prefix>bundle-<now>.json.xz and then points
+# (aws/seed.sh by default) on it, and if that changed it uploads it as <prefix>bundle-<now>.json.xz and then points
 # `<prefix>latest` at <now>. When the bucket has no `<prefix>latest` yet, the update script builds a bundle
-# from scratch (a full EC2 seed downloads ~400 GB; the other offers are far smaller).
+# from scratch (a full EC2 seed downloads ~400 GB, a full Alibaba seed ~10 GB; the others are far smaller).
 #
 #   R2_BUCKET=my-bucket R2_ACCOUNT_ID=abc123 ./publish-offer.sh AmazonRDS rds-
 #
 # Arguments:
-#   offer   AWS offer code, such as AmazonEC2 or AmazonRDS
+#   offer   offer code, such as AmazonEC2, AmazonRDS or RunpodPods
 #   prefix  put before every key in the bucket; empty for EC2, whose keys predate the other offers
-#   update  script in this directory that updates the bundle, given its path (default seed.sh); spot prices
-#           use spot.sh, since they have no price list versions to seed from
+#   update  script that updates the bundle, given its path, as a path from this directory (default
+#           aws/seed.sh); spot prices use aws/spot.sh, since they have no price list versions to seed from,
+#           and other clouds use their script in other/
 #
 # Environment:
 #   R2_BUCKET      bucket name (required)
@@ -35,8 +36,8 @@ if [[ $# -lt 2 || $# -gt 3 ]]; then
 fi
 offer="$1"
 prefix="$2"
-update="${3:-seed.sh}"
-if [[ ! "$offer" =~ ^[A-Za-z0-9]+$ || ! "$prefix" =~ ^[a-z0-9-]*$ || ! "$update" =~ ^[a-z0-9-]+\.sh$ ]]; then
+update="${3:-aws/seed.sh}"
+if [[ ! "$offer" =~ ^[A-Za-z0-9]+$ || ! "$prefix" =~ ^[a-z0-9-]*$ || ! "$update" =~ ^[a-z0-9-]+/[a-z0-9-]+\.sh$ ]]; then
   echo "publish: bad offer '$offer', prefix '$prefix' or update script '$update'" >&2
   exit 2
 fi
