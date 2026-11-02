@@ -13,6 +13,11 @@ on:
         required: false
         type: boolean
         default: false
+      go-module:
+        description: Directory of the Go module the update script builds, for its Go version
+        required: false
+        type: string
+        default: aws
 
 permissions:
   contents: read
@@ -25,7 +30,7 @@ jobs:
 
       - uses: actions/setup-go@v6
         with:
-          go-version-file: go.mod
+          go-version-file: ${{ inputs.go-module }}/go.mod
           cache: false
 
       - name: Install the AWS CLI

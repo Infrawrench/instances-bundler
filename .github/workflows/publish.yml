@@ -20,6 +20,10 @@ on:
     - cron: "13,28,43,58 * * * *" # gamelift
     # Spot every 6 hours: its prices change hourly, and each change uploads the whole bundle again.
     - cron: "14 */6 * * *" # spot
+    # RunPod every 30 minutes. Its API only has current prices; a run that sees no change uploads nothing.
+    - cron: "10,40 * * * *" # runpod
+    # Alibaba every 6 hours. It publishes a price version every few days, and every version stays published.
+    - cron: "29 */6 * * *" # alibaba
 
 permissions:
   contents: read
@@ -155,4 +159,26 @@ jobs:
     uses: ./.github/workflows/publish-script.yml
     with:
       script: publish-spot.sh
+    secrets: inherit
+
+  runpod:
+    if: github.event.schedule == '10,40 * * * *'
+    concurrency:
+      group: publish-runpod
+      cancel-in-progress: false
+    uses: ./.github/workflows/publish-script.yml
+    with:
+      script: publish-runpod.sh
+      go-module: other
+    secrets: inherit
+
+  alibaba:
+    if: github.event.schedule == '29 */6 * * *'
+    concurrency:
+      group: publish-alibaba
+      cancel-in-progress: false
+    uses: ./.github/workflows/publish-script.yml
+    with:
+      script: publish-alibaba.sh
+      go-module: other
     secrets: inherit

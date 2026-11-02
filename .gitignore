@@ -1,5 +1,8 @@
-/instances-bundler
+/aws/instances-bundler
+/other/other-instances
 bundle.json
+*-bundle.json
 *.json.xz
 spot-history/
-spot-bundle.json
+# builds from before the tools moved into aws/ and other/
+/instances-bundler
