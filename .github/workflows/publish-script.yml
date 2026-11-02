@@ -18,9 +18,16 @@ on:
         required: false
         type: string
         default: aws
+      gcp-auth:
+        description: >-
+          Get a GCP access token for the update script, through workload identity federation. The calling job
+          must grant id-token: write.
+        required: false
+        type: boolean
+        default: false
 
-permissions:
-  contents: read
+# No permissions block: this workflow gets its caller's, so only the job that grants id-token: write can
+# get a GCP token.
 
 jobs:
   publish:
@@ -43,6 +50,18 @@ jobs:
           aws --version
           for cmd in jq xz shasum; do command -v "$cmd"; done
 
+      # Only this repository's main-branch publish runs can use the provider (see the README), and the service
+      # account can only read prices and list machine types.
+      - name: Authenticate to Google Cloud
+        if: inputs.gcp-auth
+        id: gcp
+        uses: google-github-actions/auth@v3
+        with:
+          workload_identity_provider: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ vars.GCP_SERVICE_ACCOUNT }}
+          token_format: access_token
+          create_credentials_file: false
+
       - name: Publish
         run: ./${{ inputs.script }}
         env:
@@ -52,3 +71,5 @@ jobs:
           AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
           TMPDIR: ${{ runner.temp }}
           RESEED: ${{ inputs.reseed && '1' || '' }}
+          GCP_ACCESS_TOKEN: ${{ steps.gcp.outputs.access_token }}
+          GCP_PROJECT: ${{ inputs.gcp-auth && vars.GCP_PROJECT || '' }}

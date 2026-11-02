@@ -25,6 +25,8 @@ type Offer struct {
 const (
 	runpodOffer  = "RunpodPods"
 	alibabaOffer = "AlibabaECS"
+	azureOffer   = "AzureVM"
+	gcpOffer     = "GCPCompute"
 )
 
 // maxVariantKeys is the most VariantKeys any offer has.
@@ -35,6 +37,10 @@ var offers = map[string]Offer{
 	runpodOffer: {Platform: "runpod", VariantKeys: []string{"cloudType"}, Polled: true},
 	// ECS instance types, priced per region. Old versions also price the classic network.
 	alibabaOffer: {Platform: "alibaba", VariantKeys: []string{"operatingSystem", "networkType"}},
+	// Virtual machine sizes, priced per region, with Spot and Low Priority VMs as their own priority.
+	azureOffer: {Platform: "azure", VariantKeys: []string{"operatingSystem", "priority"}, Polled: true},
+	// Compute Engine machine types, priced per region, with Spot VMs as their own provisioning model.
+	gcpOffer: {Platform: "gcp", VariantKeys: []string{"provisioningModel"}, Polled: true},
 }
 
 func lookupOffer(code string) (Offer, error) {
@@ -84,6 +90,7 @@ type snapshot struct {
 	Collisions int
 	Skipped    int // products left out because the bundle has no way to store them
 	Unknown    int // prices the source has an error in place of; the bundle keeps what it had
+	Unpriced   int // instance types the source lists but that have no price anywhere
 }
 
 type snapInstance struct {
@@ -98,20 +105,30 @@ func newSnapInstance() *snapInstance {
 	return &snapInstance{Attrs: map[string]map[string]string{}, OD: map[odKey]odPrice{}, RS: map[rsKey]rsPrice{}, KeepRS: map[rsKey]bool{}}
 }
 
-// setOD records an on-demand price, counting a collision if the key already had a different one.
-func (s *snapshot) setOD(si *snapInstance, k odKey, p float64) {
+// setOD records an on-demand price that took effect when the snapshot was published.
+func (s *snapshot) setOD(si *snapInstance, k odKey, p float64) { s.setODAt(si, k, p, s.TS) }
+
+// setRS records a committed price that took effect when the snapshot was published.
+func (s *snapshot) setRS(si *snapInstance, k rsKey, hourly, upfront float64) {
+	s.setRSAt(si, k, hourly, upfront, s.TS)
+}
+
+// setODAt records an on-demand price that took effect at eff, counting a collision if the key already had a
+// different one.
+func (s *snapshot) setODAt(si *snapInstance, k odKey, p float64, eff int64) {
 	if prev, dup := si.OD[k]; dup && prev.Price != p {
 		s.Collisions++
 	}
-	si.OD[k] = odPrice{Eff: s.TS, Price: p}
+	si.OD[k] = odPrice{Eff: eff, Price: p}
 }
 
-// setRS records a committed price, counting a collision if the key already had a different one.
-func (s *snapshot) setRS(si *snapInstance, k rsKey, hourly, upfront float64) {
+// setRSAt records a committed price that took effect at eff, counting a collision if the key already had a
+// different one.
+func (s *snapshot) setRSAt(si *snapInstance, k rsKey, hourly, upfront float64, eff int64) {
 	if prev, dup := si.RS[k]; dup && (prev.Hourly != hourly || prev.Upfront != upfront) {
 		s.Collisions++
 	}
-	si.RS[k] = rsPrice{Eff: s.TS, Hourly: hourly, Upfront: upfront}
+	si.RS[k] = rsPrice{Eff: eff, Hourly: hourly, Upfront: upfront}
 }
 
 var (

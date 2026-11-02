@@ -213,27 +213,7 @@ func runpodQuery(ctx context.Context, client *http.Client, endpoint, query strin
 
 // isRunpodSource reports whether the file starting with head is a fetched RunPod file.
 func isRunpodSource(head []byte) bool {
-	dec := json.NewDecoder(bytes.NewReader(head))
-	if err := expectDelim(dec, '{'); err != nil {
-		return false
-	}
-	t, err := dec.Token()
-	if err != nil || t != "kind" {
-		return false
-	}
-	t, err = dec.Token()
-	return err == nil && t == runpodSourceKind
-}
-
-func expectDelim(dec *json.Decoder, want json.Delim) error {
-	t, err := dec.Token()
-	if err != nil {
-		return err
-	}
-	if t != want {
-		return fmt.Errorf("expected %v, got %v", want, t)
-	}
-	return nil
+	return sourceKind(head) == runpodSourceKind
 }
 
 // readRunpod turns a fetched RunPod file into a snapshot.

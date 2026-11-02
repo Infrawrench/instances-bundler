@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"context"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -17,21 +18,26 @@ in the same bundle format as instances-bundler, one bundle per offer:
 
   RunpodPods  RunPod GPU and CPU pods (platform runpod)
   AlibabaECS  Alibaba Cloud ECS instance types (platform alibaba)
+  AzureVM     Azure virtual machine sizes (platform azure)
+  GCPCompute  Google Cloud Compute Engine machine types (platform gcp)
 
 Usage:
   other-instances fetch runpod -o <runpod.json>
+  other-instances fetch azure -o <azure.json>
+  other-instances fetch gcp -o <gcp.json>
   other-instances fetch alibaba [-version 2.0.<n>|latest] -o <dir>
   other-instances versions alibaba [-after 2.0.<n>]
   other-instances compress -o <bundle.json> <source>
   other-instances append [-o <out.json>] <bundle.json> <source>
   other-instances upgrade [-o <out.json>] <bundle.json>
 
-fetch     saves the provider's current prices as a source: a file for RunPod, a directory for Alibaba.
+fetch     saves the provider's current prices as a source: a file for RunPod, Azure and GCP,
+          a directory for Alibaba. GCP needs credentials: see gcpauth.go.
 versions  lists Alibaba's published price versions after -after (default: all of them), oldest first.
 compress  builds a new bundle from one source.
 append    adds a newer source to a bundle, recording only what changed. The bundle is rewritten in
           place unless -o is given. Exits with status 3 if there is nothing to add: the source is not
-          newer than the bundle's latest snapshot, or (for RunPod) nothing changed since it.
+          newer than the bundle's latest snapshot, or (for RunPod, Azure and GCP) nothing changed since it.
 upgrade   rewrites a bundle in the current format.
 `
 
@@ -72,7 +78,7 @@ var httpClient = &http.Client{Timeout: 5 * time.Minute}
 
 func runFetch(args []string) error {
 	if len(args) == 0 {
-		return fmt.Errorf("usage: other-instances fetch <runpod|alibaba> ...")
+		return fmt.Errorf("usage: other-instances fetch <runpod|alibaba|azure|gcp> ...")
 	}
 	provider := args[0]
 	fs := flag.NewFlagSet("fetch "+provider, flag.ContinueOnError)
@@ -83,7 +89,7 @@ func runFetch(args []string) error {
 		return err
 	}
 	if len(pos) != 0 || *out == "" {
-		return fmt.Errorf("usage: other-instances fetch runpod -o <file> | fetch alibaba [-version 2.0.<n>|latest] -o <dir>")
+		return fmt.Errorf("usage: other-instances fetch runpod|azure|gcp -o <file> | fetch alibaba [-version 2.0.<n>|latest] -o <dir>")
 	}
 	ctx := context.Background()
 	switch provider {
@@ -92,6 +98,24 @@ func runFetch(args []string) error {
 		if err != nil {
 			return err
 		}
+		return writeAtomic(*out, func(w *bufio.Writer) error { return writeJSON(w, src) })
+	case "azure":
+		src, err := fetchAzure(ctx, httpClient, azureRetailURL, azureCalculatorURL)
+		if err != nil {
+			return err
+		}
+		fmt.Fprintf(os.Stderr, "fetched %d Azure prices and %d calculator sizes\n", len(src.Items), len(src.Specs))
+		return writeAtomic(*out, func(w *bufio.Writer) error { return writeJSON(w, src) })
+	case "gcp":
+		creds, err := gcpCredentials(ctx, httpClient)
+		if err != nil {
+			return err
+		}
+		src, err := fetchGCP(ctx, httpClient, gcpBillingURL, gcpComputeURL, creds)
+		if err != nil {
+			return err
+		}
+		fmt.Fprintf(os.Stderr, "fetched %d Compute Engine SKUs and %d machine types (by zone) from project %s\n", len(src.Skus), len(src.MachineTypes), creds.Project)
 		return writeAtomic(*out, func(w *bufio.Writer) error { return writeJSON(w, src) })
 	case "alibaba":
 		v := *version
@@ -113,7 +137,7 @@ func runFetch(args []string) error {
 		fmt.Fprintf(os.Stderr, "fetched Alibaba price version %s into %s\n", v, *out)
 		return nil
 	default:
-		return fmt.Errorf("unknown provider %q; fetch supports runpod and alibaba", provider)
+		return fmt.Errorf("unknown provider %q; fetch supports runpod, alibaba, azure and gcp", provider)
 	}
 }
 
@@ -212,7 +236,7 @@ func runUpgrade(args []string) error {
 	return writeBundle(*out, b)
 }
 
-// loadSource reads a fetched source: a directory of Alibaba price files, or a RunPod file.
+// loadSource reads a fetched source: a directory of Alibaba price files, or a RunPod, Azure or GCP file.
 func loadSource(path string) (*snapshot, error) {
 	start := time.Now()
 	info, err := os.Stat(path)
@@ -233,10 +257,16 @@ func loadSource(path string) (*snapshot, error) {
 		defer f.Close()
 		r := bufio.NewReaderSize(f, 1<<20)
 		head, _ := r.Peek(256)
-		if !isRunpodSource(head) {
+		switch sourceKind(head) {
+		case runpodSourceKind:
+			snap, err = readRunpod(r)
+		case azureSourceKind:
+			snap, err = readAzure(r)
+		case gcpSourceKind:
+			snap, err = readGCP(r)
+		default:
 			return nil, fmt.Errorf("%s: not a source; use other-instances fetch to make one", path)
 		}
-		snap, err = readRunpod(r)
 	}
 	if err != nil {
 		return nil, fmt.Errorf("%s: %w", path, err)
@@ -252,6 +282,9 @@ func loadSource(path string) (*snapshot, error) {
 	}
 	if snap.Skipped > 0 {
 		fmt.Fprintf(os.Stderr, "warning: %d products were left out because the bundle has no variant for them\n", snap.Skipped)
+	}
+	if snap.Unpriced > 0 {
+		fmt.Fprintf(os.Stderr, "note: %d instance types have no price in any region and were left out\n", snap.Unpriced)
 	}
 	if snap.Unknown > 0 {
 		fmt.Fprintf(os.Stderr, "note: %d prices were errors in the source (such as Throttling); the bundle keeps their last known price\n", snap.Unknown)
@@ -303,8 +336,9 @@ func writeBundle(path string, b *Bundle) error {
 }
 
 func writeJSON(w *bufio.Writer, v any) error {
-	_, err := w.WriteString(compactJSON(v) + "\n")
-	return err
+	enc := json.NewEncoder(w)
+	enc.SetEscapeHTML(false)
+	return enc.Encode(v)
 }
 
 // writeAtomic writes to a temp file next to path and renames it over, so a failed write never leaves a broken file.

@@ -13,6 +13,8 @@ runpod.get("NVIDIA H100 80GB HBM3")?.pricing.onDemand;
 | --- | --- | --- | --- | --- |
 | `runpod` | `RunpodPods` | GPU types and CPU pod sizes | RunPod's public GraphQL API | the first run |
 | `alibaba` | `AlibabaECS` | ECS instance types | the versioned price package behind Alibaba Cloud's ECS pricing page | May 2018 (version 2.0.0) |
+| `azure` | `AzureVM` | virtual machine sizes | Azure's Retail Prices API, with specs from Azure's pricing calculator | the first run |
+| `gcp` | `GCPCompute` | Compute Engine machine types | the Cloud Billing Catalog API and the Compute Engine API (needs [credentials](#gcp-credentials)) | the first run |
 
 Each offer has its own reader and its own variant keys and terms (see [Offers](#offers)). Around them, the
 bundle, the merge rules and the publishing are shared, so adding a provider is a reader and a line in
@@ -25,6 +27,8 @@ cd other
 go build -o other-instances .
 
 ./other-instances fetch runpod -o runpod.json                  # RunPod's current prices, as a source file
+./other-instances fetch azure -o azure.json                    # Azure's current prices, as a source file
+./other-instances fetch gcp -o gcp.json                        # Google Cloud's current prices (needs credentials)
 ./other-instances fetch alibaba -version 2.0.426 -o ali/       # one Alibaba price version, as a directory
 ./other-instances versions alibaba -after 2.0.400              # Alibaba versions published since
 
@@ -35,13 +39,15 @@ go test ./...
 ```
 
 `append` exits with status 3 when there is nothing to add: the source is not newer than the bundle's latest
-snapshot or, for RunPod, nothing in it changed.
+snapshot or, for RunPod, Azure and GCP, nothing in it changed.
 
 The update scripts do the fetching and appending, creating the bundle if it doesn't exist:
 
 - `other/update-runpod.sh [runpod-bundle.json]` adds RunPod's current prices. RunPod has no price history to
   download, so the bundle starts on its first run. A read that changes nothing isn't recorded, so the
   snapshots list only grows when a price, attribute or data center changes.
+- `other/update-azure.sh [azure-bundle.json]` and `other/update-gcp.sh [gcp-bundle.json]` work the same way
+  for Azure and Google Cloud, which also publish only their current prices.
 - `other/update-alibaba.sh [alibaba-bundle.json]` adds every Alibaba version published since the bundle's
   `source_version`, oldest first. Without a bundle it seeds from version 2.0.0: 408 versions, about 10 GB of
   downloads, one version on disk at a time. `MAX_VERSIONS=n` stops after `n`. Re-running resumes.
@@ -103,6 +109,92 @@ package. Every version stays published, numbered 2.0.0 to 2.0.426 so far with a 
   rather than recording the reservation as withdrawn and offered again a version later, and `append` prints
   how many there were.
 
+### Azure (`AzureVM`)
+
+Read from `https://prices.azure.com/api/retail/prices` (API version `2023-01-01-preview`, which adds savings
+plans), filtered to `serviceName eq 'Virtual Machines'` without the Dev/Test prices: about 540,000 prices. The
+API pages 1000 prices at a time, each page linking to the next, which takes over half an hour in a row. So
+`fetch azure` splits the prices into parts and reads 8 at a time, about five minutes in all. A part with more
+than one page is split in two by the next condition in `azureSplits` (reservation or not, Windows or not, Spot
+or not, then ARM name prefixes such as `Standard_D`, `Standard_D2`). The API has no `not` or `or`, but takes
+`... eq false`, so the two halves of a split never overlap or miss a price, and it rejects filters of more than
+about a dozen conditions, which the splits stay within.
+
+- **Instances** are ARM SKU names (`Standard_D2s_v3`), priced per VM per hour. Dedicated hosts (priced per
+  host) and Cloud Services roles are left out.
+- **Region:** the ARM region (`eastus`). The regions table gives its `regionCode`, `locationType`
+  (`Azure Region`, or `Global` for the few Spot prices Azure lists as `Global`), and `name` (`US East`).
+- **Variant keys:** `operatingSystem`, `Windows` for products named `... Windows`, `... Windows VM` or
+  `... Win`, otherwise `Linux`; and `priority`, `Regular`, `Spot` or `Low Priority`, from the SKU name's suffix.
+- **Prices** are dated by Azure's `effectiveStartDate`, or by the fetch if that is later (the API only lists
+  prices in effect), or if it is no later than the key's previous row.
+- **Terms:** reservations are `[1yr|3yr|5yr, Reserved Instance, All Upfront]`, `hourly` 0 and `upfront` the
+  whole term's price (Azure charges the same paid monthly). Azure lists them for Linux only: a Windows
+  reservation covers the same compute, with the license billed on top. Savings plans are
+  `[1yr|3yr, Savings Plan, No Upfront]`, with the plan's hourly rate.
+- **Attributes:** `skuName` and `productName` (from the Linux pay-as-you-go price), `productFamily`
+  (`Virtual Machines`), and, from the pricing calculator (`azure.microsoft.com/api/v3/pricing/virtual-machines/calculator`),
+  `cores`, `ram` (GB), `diskSize` (temporary disk, GB), `gpu`, `series` and `isVcpu`. The calculator names sizes
+  differently (`linux-e4-2s-v3-standard`), so they are matched on the name's letters and digits, and `_Promo`
+  sizes use their base size. The calculator doesn't list every size (about a third, mostly the newest and
+  retired series, have no specs).
+
+### Google Cloud Compute Engine (`GCPCompute`)
+
+Read from the Cloud Billing Catalog API (`cloudbilling.googleapis.com/v1/services/6F81-5844-456A/skus`, every
+Compute SKU in USD) and the Compute Engine API's `aggregated/machineTypes`, which lists every machine type in
+every zone. Both need credentials; see [GCP credentials](#gcp-credentials). A fetch takes under a minute.
+
+Most machine types have no SKU of their own: Compute Engine bills each family's vCPUs and memory, and GPUs,
+separately. So a machine type's price is worked out from its shape:
+`guestCpus × the family's vCPU rate + memoryMb / 1024 × its rate per GiB + each GPU × the GPU's rate`.
+For example, n2-standard-2 in us-central1 is 2 × $0.031611 + 8 × $0.004237 = $0.097118.
+
+- **Instances** are machine type names (`n2-standard-2`).
+- **Families:** a machine type's vCPU and memory SKUs are found by its family's SKU name: usually its name up to
+  the first `-` (`n2` matches `N2 Instance Core`, `C4A Arm Instance Core` is `c4a`), and for the rest
+  `gcpFamilyStems` (C2 is `Compute optimized`, M1 and M2 `Memory-optimized`, a3-megagpu `A3Plus`, and so on).
+  GPUs come from the machine type's `accelerators`, matched by `gcpGPUStems`. A4 is billed by GPU slice, which
+  includes its share of the vCPUs and memory. Shared-core E2 types are billed for a share of a vCPU (e2-micro
+  0.25, e2-small 0.5, e2-medium 1); f1-micro and g1-small have their own SKUs.
+- **Left out:** sole tenancy, custom machine types, reservations, Dynamic Workload Scheduler and premium SKUs;
+  bundled Local SSD (`-lssd` types and others list `bundledLocalSsds.partitionCount` but are priced without
+  it); OS licenses (prices are for free images); sustained use discounts. TPU machine types, X4 and X5 bare
+  metal, and A4X have no per-vCPU SKUs, so they are left out, and `append` prints how many there were. A
+  machine type is priced in a region only if every part of its price has a SKU there.
+- **Region:** the region (`us-central1`), with `regionCode` and `locationType` (`Google Cloud Region`). Each
+  machine type's `zones` attribute lists the zones in the region that have it.
+- **Variant key:** `provisioningModel`, `Standard` or `Spot` (`Spot Preemptible ...` SKUs).
+- **Terms:** resource-based committed use discounts, `[1yr|3yr, Committed Use, No Upfront]`, with the
+  commitment's hourly rate for the machine type's vCPUs, memory and GPUs. Shared-core types have none.
+- **Attributes:** the machine type's fields (`guestCpus`, `memoryMb`, `description`, `isSharedCpu`,
+  `architecture`, `maximumPersistentDisks`, `bundledLocalSsds.partitionCount`, ...), `acceleratorType` and
+  `acceleratorCount`, `deprecated` (its state), and `productFamily` (`Compute Engine`).
+- **Gaps in Google's data:** a few regions list two SKUs for one family (`Memory-optimized ... in Virginia` and
+  `... in Northern Virginia`). The lower price is kept, and `append` prints how many there were.
+
+### GCP credentials
+
+`fetch gcp` needs an OAuth access token and a project to list machine types in. It looks, in order, for:
+
+- `GCP_ACCESS_TOKEN` and `GCP_PROJECT`, a token from elsewhere (`gcloud auth print-access-token`);
+- `GCP_SERVICE_ACCOUNT_KEY`, the contents of a service account key;
+- `GOOGLE_APPLICATION_CREDENTIALS`, the path of a service account key or authorized user file;
+- gcloud's application default credentials (`gcloud auth application-default login`).
+
+`GCP_PROJECT` overrides the key's project. The token needs `cloud-billing.readonly` and `compute.readonly`
+scopes; any identity can read the catalog, and listing machine types needs `compute.machineTypes.list` in the
+project. The module keeps to the standard library, so `gcpauth.go` signs service account tokens and refreshes
+user tokens itself.
+
+In CI, nothing secret is stored. The `gcp` job gets a one-hour token through workload identity federation
+(`google-github-actions/auth`) as the service account
+`instances-bundler-pricing@consummate-atom-503516-h4.iam.gserviceaccount.com`, which has one custom role,
+`machineTypeReader` (`compute.machineTypes.list` and `.get`). The pool `instances-bundler-github` only accepts
+tokens from this repository's `publish-script.yml` on `main`, run by a schedule or by hand. The repository
+variables `GCP_PROJECT`, `GCP_SERVICE_ACCOUNT` and `GCP_WORKLOAD_IDENTITY_PROVIDER` name them, and only the
+`gcp` job in `publish.yml` grants `id-token: write`.
+
 ## Format
 
 The bundle is instances-bundler's format (see the [top-level README](../README.md#format) for the full description), with the offer and its
@@ -137,7 +229,7 @@ with the changes up to `t` applied. Rows are only added when something changes.
 
 ## Publishing
 
-The top-level `publish-runpod.sh` and `publish-alibaba.sh` keep these bundles up to date in R2, in the same
+The top-level `publish-runpod.sh`, `publish-alibaba.sh`, `publish-azure.sh` and `publish-gcp.sh` keep these bundles up to date in R2, in the same
 bucket as the AWS ones, through the shared `publish-offer.sh` (see the [top-level README](../README.md#publishing)):
 it downloads the bundle `<platform>-latest` points at, runs `other/update-<platform>.sh` on it, and if the bundle
 changed, uploads `<platform>-bundle-<now>.json.xz` and moves `<platform>-latest`.
@@ -151,7 +243,7 @@ If the bucket has no `<platform>-latest`, the update script builds the bundle fr
 downloads every version. `SEED_BUNDLE=path` starts from a bundle built locally instead, and `RESEED=1`
 rebuilds a published bundle (needed if an offer's variant keys change).
 
-`.github/workflows/publish.yml` runs RunPod every 30 minutes and Alibaba every 6 hours.
+`.github/workflows/publish.yml` runs RunPod every 30 minutes, Azure and GCP hourly, and Alibaba every 6 hours.
 
 ## Adding a provider
 
@@ -173,5 +265,9 @@ state.go        reading prices and attributes back out (copied from ../aws)
 attrs.go        flattening provider JSON into attributes
 runpod.go       RunPod fetcher and reader
 alibaba.go      Alibaba fetcher, version prober and reader
+azure.go        Azure fetcher (parallel, split by filters) and reader
+gcp.go          GCP fetcher and reader, which prices machine types from their shape
+gcpauth.go      GCP access tokens from service account keys and user credentials
 bundle_test.go  readers, history rules, fetchers against fake servers
+cloud_test.go   the same for Azure and GCP
 ```

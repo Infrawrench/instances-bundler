@@ -24,6 +24,10 @@ on:
     - cron: "10,40 * * * *" # runpod
     # Alibaba every 6 hours. It publishes a price version every few days, and every version stays published.
     - cron: "29 */6 * * *" # alibaba
+    # Azure hourly. Its API only has current prices, read in about five minutes; a run that sees no change uploads nothing.
+    - cron: "44 * * * *" # azure
+    # GCP hourly, likewise.
+    - cron: "59 * * * *" # gcp
 
 permissions:
   contents: read
@@ -181,4 +185,31 @@ jobs:
     with:
       script: publish-alibaba.sh
       go-module: other
+    secrets: inherit
+
+  azure:
+    if: github.event.schedule == '44 * * * *'
+    concurrency:
+      group: publish-azure
+      cancel-in-progress: false
+    uses: ./.github/workflows/publish-script.yml
+    with:
+      script: publish-azure.sh
+      go-module: other
+    secrets: inherit
+
+  gcp:
+    if: github.event.schedule == '59 * * * *'
+    concurrency:
+      group: publish-gcp
+      cancel-in-progress: false
+    # The only job that can get a GCP token.
+    permissions:
+      contents: read
+      id-token: write
+    uses: ./.github/workflows/publish-script.yml
+    with:
+      script: publish-gcp.sh
+      go-module: other
+      gcp-auth: true
     secrets: inherit

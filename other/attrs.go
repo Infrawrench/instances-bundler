@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"strings"
 )
 
@@ -68,4 +69,32 @@ func decodeNumbers(data []byte, dst any) error {
 	dec := json.NewDecoder(bytes.NewReader(data))
 	dec.UseNumber()
 	return dec.Decode(dst)
+}
+
+// sourceKind reads the "kind" a fetched source file starts with, or "" if it doesn't start with one.
+func sourceKind(head []byte) string {
+	dec := json.NewDecoder(bytes.NewReader(head))
+	if err := expectDelim(dec, '{'); err != nil {
+		return ""
+	}
+	if t, err := dec.Token(); err != nil || t != "kind" {
+		return ""
+	}
+	t, err := dec.Token()
+	if err != nil {
+		return ""
+	}
+	s, _ := t.(string)
+	return s
+}
+
+func expectDelim(dec *json.Decoder, want json.Delim) error {
+	t, err := dec.Token()
+	if err != nil {
+		return err
+	}
+	if t != want {
+		return fmt.Errorf("expected %v, got %v", want, t)
+	}
+	return nil
 }
