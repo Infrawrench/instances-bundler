@@ -27,6 +27,13 @@ const (
 	alibabaOffer = "AlibabaECS"
 	azureOffer   = "AzureVM"
 	gcpOffer     = "GCPCompute"
+
+	hetznerOffer        = "HetznerCloud"
+	hetznerAuctionOffer = "HetznerAuction"
+	ovhOffer            = "OVHPublicCloud"
+	ovhEcoOffer         = "OVHEco"
+	oracleOffer         = "OracleCompute"
+	ibmOffer            = "IBMVPC"
 )
 
 // maxVariantKeys is the most VariantKeys any offer has.
@@ -41,6 +48,18 @@ var offers = map[string]Offer{
 	azureOffer: {Platform: "azure", VariantKeys: []string{"operatingSystem", "priority"}, Polled: true},
 	// Compute Engine machine types, priced per region, with Spot VMs as their own provisioning model.
 	gcpOffer: {Platform: "gcp", VariantKeys: []string{"provisioningModel"}, Polled: true},
+	// Cloud servers, priced per location, with or without their primary IPv4 (which is optional and billed apart).
+	hetznerOffer: {Platform: "hetzner", VariantKeys: []string{"ipv4"}, Polled: true},
+	// Server Auction listings by id, each one physical server, priced like cloud servers.
+	hetznerAuctionOffer: {Platform: "hetznerauction", VariantKeys: []string{"ipv4"}, Polled: true},
+	// Public Cloud instance flavors, priced per pricing zone, since the catalog has no regions.
+	ovhOffer: {Platform: "ovh", VariantKeys: []string{"operatingSystem"}, Polled: true},
+	// Kimsufi, So you Start, Rise and Advance dedicated servers, priced per month per data center and configuration.
+	ovhEcoOffer: {Platform: "ovheco", VariantKeys: []string{"memory", "storage", "systemStorage"}, Polled: true},
+	// VM and bare metal shapes, priced the same everywhere. Flexible shapes are priced at a set of sizes.
+	oracleOffer: {Platform: "oracle", VariantKeys: []string{"operatingSystem"}, Polled: true},
+	// Virtual Server for VPC profiles, priced per region, with Spot and burstable capacity as their own type.
+	ibmOffer: {Platform: "ibm", VariantKeys: []string{"capacityType"}, Polled: true},
 }
 
 func lookupOffer(code string) (Offer, error) {
