@@ -7,7 +7,7 @@ A 1.5 GB AWS EC2 file becomes about 30.5 MB of minified JSON (5.4 MB gzipped). E
 The repository has two tools that write the same bundle format into the same bucket:
 
 - `aws/`: this tool, for AWS offers. Everything below describes it unless it says otherwise.
-- `other/`: `other-instances`, for other clouds: RunPod GPU and CPU pods (`runpod`), Alibaba Cloud ECS (`alibaba`), Azure virtual machines (`azure`) and Google Cloud Compute Engine (`gcp`). See [other/README.md](other/README.md).
+- `other/`: `other-instances`, for other clouds: RunPod GPU and CPU pods (`runpod`), Alibaba Cloud ECS (`alibaba`), Azure virtual machines (`azure`), Google Cloud Compute Engine (`gcp`), Hetzner cloud servers (`hetzner`) and Server Auction listings (`hetznerauction`), OVHcloud Public Cloud instances (`ovh`) and Kimsufi, So you Start, Rise and Advance servers (`ovheco`), Oracle Cloud compute (`oracle`) and IBM Cloud Virtual Servers for VPC (`ibm`). See [other/README.md](other/README.md).
 
 The publish scripts for every platform are at the top level (see [Publishing](#publishing)).
 
@@ -90,7 +90,7 @@ Products without an `instanceType` (data transfer, EBS, IPs, load balancers, sto
 | Platform | Keys |
 | --- | --- |
 | ec2 | `latest`, `bundle-<timestamp>.json.xz` |
-| rds, elasticache, …, spot, runpod, alibaba, azure, gcp | `<platform>-latest`, `<platform>-bundle-<timestamp>.json.xz` (e.g. `rds-latest`) |
+| rds, elasticache, …, spot, runpod, alibaba, azure, gcp, hetzner, hetznerauction, ovh, ovheco, oracle, ibm | `<platform>-latest`, `<platform>-bundle-<timestamp>.json.xz` (e.g. `rds-latest`) |
 
 EC2 keeps its unprefixed keys because they were in use before the other platforms were added. `<prefix>latest` holds a timestamp. The script downloads the bundle it points at, runs the update script on it, and if anything was added uploads it as a new `<prefix>bundle-<now>.json.xz` before moving `<prefix>latest`.
 
@@ -101,7 +101,7 @@ AWS_ACCESS_KEY_ID=... AWS_SECRET_ACCESS_KEY=... ./publish-rds.sh
 
 If the bucket has no `<prefix>latest`, the script seeds a new bundle from scratch. For EC2 that is a 400 GB seed, so seed EC2 from a machine that already has a bundle rather than from CI. The other platforms can seed from scratch in CI on their first run (Alibaba downloads about 10 GB; RunPod, Azure and GCP have no history to seed). To rebuild an existing bundle from scratch, for example after changing an offer's `variant_keys` (which makes the old bundle unreadable), run its script with `RESEED=1`. That publishes a new bundle and moves `<prefix>latest` to it, leaving the old bundles in the bucket. `publish-script.yml` has a matching `reseed` input.
 
-`.github/workflows/publish.yml` has one cron and one job per platform: EC2 every 5 minutes, spot and Alibaba every 6 hours, RunPod every 30 minutes, Azure and GCP hourly, and the others every 15 minutes at staggered offsets. Spot prices change about hourly and every change uploads the whole bundle (about 21 MB) again, so spot runs less often; between runs, only the feed's latest prices are kept, so the spot history after the seed has a price every 6 hours rather than every hour. All run on `ubuntu-24.04-arm`. Each job runs the steps in `publish-script.yml` (its `go-module` input, `aws` or `other`, picks the Go version), and only one run per platform happens at a time. The jobs read the repository variables `R2_BUCKET` and `R2_ACCOUNT_ID`, and the secrets `R2_ACCESS_KEY_ID` and `R2_SECRET_ACCESS_KEY` (an R2 API token with read and write access to the bucket). The GCP job also reads `GCP_PROJECT`, `GCP_SERVICE_ACCOUNT` and `GCP_WORKLOAD_IDENTITY_PROVIDER`; see [GCP credentials](other/README.md#gcp-credentials).
+`.github/workflows/publish.yml` has one cron and one job per platform: EC2 every 5 minutes, spot, Alibaba and IBM every 6 hours, RunPod every 30 minutes, Azure, GCP, Hetzner, OVHcloud and Oracle hourly, and the others every 15 minutes at staggered offsets. Spot prices change about hourly and every change uploads the whole bundle (about 21 MB) again, so spot runs less often; between runs, only the feed's latest prices are kept, so the spot history after the seed has a price every 6 hours rather than every hour. All run on `ubuntu-24.04-arm`. Each job runs the steps in `publish-script.yml` (its `go-module` input, `aws` or `other`, picks the Go version), and only one run per platform happens at a time. The jobs read the repository variables `R2_BUCKET` and `R2_ACCOUNT_ID`, and the secrets `R2_ACCESS_KEY_ID` and `R2_SECRET_ACCESS_KEY` (an R2 API token with read and write access to the bucket). The GCP job also reads `GCP_PROJECT`, `GCP_SERVICE_ACCOUNT` and `GCP_WORKLOAD_IDENTITY_PROVIDER`; see [GCP credentials](other/README.md#gcp-credentials).
 
 To add an AWS platform, add its offer to `aws/offers.go`, add a `publish-<platform>.sh`, and add a cron and a job to `publish.yml`. Other clouds go in `other/` (see its README).
 

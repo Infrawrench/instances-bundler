@@ -300,12 +300,21 @@ func getJSONAuth(ctx context.Context, client *http.Client, u, token string, dst 
 			continue
 		}
 		if resp.StatusCode != http.StatusOK {
-			return fmt.Errorf("%s: %s", resp.Status, bytes.TrimSpace(data[:min(len(data), 300)]))
+			return &httpStatusError{Code: resp.StatusCode, Status: resp.Status, Body: string(bytes.TrimSpace(data[:min(len(data), 300)]))}
 		}
 		return decodeNumbers(data, dst)
 	}
 	return last
 }
+
+// httpStatusError is an answer getJSON doesn't retry, for callers that treat some statuses differently.
+type httpStatusError struct {
+	Code   int
+	Status string
+	Body   string
+}
+
+func (e *httpStatusError) Error() string { return e.Status + ": " + e.Body }
 
 // isAzureSource reports whether the file starting with head is a fetched Azure file.
 func isAzureSource(head []byte) bool {

@@ -20,24 +20,31 @@ in the same bundle format as instances-bundler, one bundle per offer:
   AlibabaECS  Alibaba Cloud ECS instance types (platform alibaba)
   AzureVM     Azure virtual machine sizes (platform azure)
   GCPCompute  Google Cloud Compute Engine machine types (platform gcp)
+  HetznerCloud    Hetzner cloud servers (platform hetzner)
+  HetznerAuction  Hetzner Server Auction listings (platform hetznerauction)
+  OVHPublicCloud  OVHcloud Public Cloud instance flavors (platform ovh)
+  OVHEco          OVHcloud Kimsufi, So you Start, Rise and Advance servers (platform ovheco)
+  OracleCompute   Oracle Cloud VM and bare metal shapes (platform oracle)
+  IBMVPC          IBM Cloud Virtual Server for VPC profiles (platform ibm)
 
 Usage:
   other-instances fetch runpod -o <runpod.json>
   other-instances fetch azure -o <azure.json>
   other-instances fetch gcp -o <gcp.json>
+  other-instances fetch hetzner|hetznerauction|ovh|ovheco|oracle|ibm -o <file.json>
   other-instances fetch alibaba [-version 2.0.<n>|latest] -o <dir>
   other-instances versions alibaba [-after 2.0.<n>]
   other-instances compress -o <bundle.json> <source>
   other-instances append [-o <out.json>] <bundle.json> <source>
   other-instances upgrade [-o <out.json>] <bundle.json>
 
-fetch     saves the provider's current prices as a source: a file for RunPod, Azure and GCP,
-          a directory for Alibaba. GCP needs credentials: see gcpauth.go.
+fetch     saves the provider's current prices as a source: a directory for Alibaba, otherwise a file.
+          GCP needs credentials: see gcpauth.go.
 versions  lists Alibaba's published price versions after -after (default: all of them), oldest first.
 compress  builds a new bundle from one source.
 append    adds a newer source to a bundle, recording only what changed. The bundle is rewritten in
           place unless -o is given. Exits with status 3 if there is nothing to add: the source is not
-          newer than the bundle's latest snapshot, or (for RunPod, Azure and GCP) nothing changed since it.
+          newer than the bundle's latest snapshot, or (for all but Alibaba) nothing changed since it.
 upgrade   rewrites a bundle in the current format.
 `
 
@@ -78,7 +85,7 @@ var httpClient = &http.Client{Timeout: 5 * time.Minute}
 
 func runFetch(args []string) error {
 	if len(args) == 0 {
-		return fmt.Errorf("usage: other-instances fetch <runpod|alibaba|azure|gcp> ...")
+		return fmt.Errorf("usage: other-instances fetch <provider> ...; providers: runpod, alibaba, azure, gcp, hetzner, hetznerauction, ovh, ovheco, oracle, ibm")
 	}
 	provider := args[0]
 	fs := flag.NewFlagSet("fetch "+provider, flag.ContinueOnError)
@@ -89,7 +96,7 @@ func runFetch(args []string) error {
 		return err
 	}
 	if len(pos) != 0 || *out == "" {
-		return fmt.Errorf("usage: other-instances fetch runpod|azure|gcp -o <file> | fetch alibaba [-version 2.0.<n>|latest] -o <dir>")
+		return fmt.Errorf("usage: other-instances fetch <provider> -o <file> | fetch alibaba [-version 2.0.<n>|latest] -o <dir>")
 	}
 	ctx := context.Background()
 	switch provider {
@@ -117,6 +124,48 @@ func runFetch(args []string) error {
 		}
 		fmt.Fprintf(os.Stderr, "fetched %d Compute Engine SKUs and %d machine types (by zone) from project %s\n", len(src.Skus), len(src.MachineTypes), creds.Project)
 		return writeAtomic(*out, func(w *bufio.Writer) error { return writeJSON(w, src) })
+	case "hetzner":
+		src, err := fetchHetzner(ctx, httpClient, hetznerSiteURL, hetznerPriceURL)
+		if err != nil {
+			return err
+		}
+		fmt.Fprintf(os.Stderr, "fetched %d Hetzner cloud servers\n", len(src.Servers))
+		return writeAtomic(*out, func(w *bufio.Writer) error { return writeJSON(w, src) })
+	case "hetznerauction":
+		src, err := fetchHetznerAuction(ctx, httpClient, hetznerAuctionURL)
+		if err != nil {
+			return err
+		}
+		fmt.Fprintf(os.Stderr, "fetched %d Hetzner Server Auction listings\n", len(src.Servers))
+		return writeAtomic(*out, func(w *bufio.Writer) error { return writeJSON(w, src) })
+	case "ovh":
+		src, err := fetchOVH(ctx, httpClient, ovhWorldURL, ovhUSURL)
+		if err != nil {
+			return err
+		}
+		fmt.Fprintf(os.Stderr, "fetched %d OVHcloud World and %d US instance plans\n", len(src.Catalogs[0].Addons), len(src.Catalogs[1].Addons))
+		return writeAtomic(*out, func(w *bufio.Writer) error { return writeJSON(w, src) })
+	case "ovheco":
+		src, err := fetchOVHEco(ctx, httpClient, ovhWorldURL)
+		if err != nil {
+			return err
+		}
+		fmt.Fprintf(os.Stderr, "fetched %d OVHcloud eco plans in %d configurations\n", len(src.Plans), len(src.Options))
+		return writeAtomic(*out, func(w *bufio.Writer) error { return writeJSON(w, src) })
+	case "oracle":
+		src, err := fetchOracle(ctx, httpClient, oraclePartsURL, oraclePresetsURL)
+		if err != nil {
+			return err
+		}
+		fmt.Fprintf(os.Stderr, "fetched %d Oracle price list parts and %d shapes\n", len(src.Parts), len(src.Shapes))
+		return writeAtomic(*out, func(w *bufio.Writer) error { return writeJSON(w, src) })
+	case "ibm":
+		src, err := fetchIBM(ctx, httpClient, ibmCatalogURL)
+		if err != nil {
+			return err
+		}
+		fmt.Fprintf(os.Stderr, "fetched %d IBM instance profiles and %d pricing plans (%d plans not public)\n", len(src.Profiles), len(src.Plans), len(src.MissingPlans))
+		return writeAtomic(*out, func(w *bufio.Writer) error { return writeJSON(w, src) })
 	case "alibaba":
 		v := *version
 		if v == "latest" {
@@ -137,7 +186,7 @@ func runFetch(args []string) error {
 		fmt.Fprintf(os.Stderr, "fetched Alibaba price version %s into %s\n", v, *out)
 		return nil
 	default:
-		return fmt.Errorf("unknown provider %q; fetch supports runpod, alibaba, azure and gcp", provider)
+		return fmt.Errorf("unknown provider %q; fetch supports runpod, alibaba, azure, gcp, hetzner, hetznerauction, ovh, ovheco, oracle and ibm", provider)
 	}
 }
 
@@ -236,7 +285,7 @@ func runUpgrade(args []string) error {
 	return writeBundle(*out, b)
 }
 
-// loadSource reads a fetched source: a directory of Alibaba price files, or a RunPod, Azure or GCP file.
+// loadSource reads a fetched source: a directory of Alibaba price files, or another provider's file.
 func loadSource(path string) (*snapshot, error) {
 	start := time.Now()
 	info, err := os.Stat(path)
@@ -264,6 +313,18 @@ func loadSource(path string) (*snapshot, error) {
 			snap, err = readAzure(r)
 		case gcpSourceKind:
 			snap, err = readGCP(r)
+		case hetznerSourceKind:
+			snap, err = readHetzner(r)
+		case hetznerAuctionSourceKind:
+			snap, err = readHetznerAuction(r)
+		case ovhSourceKind:
+			snap, err = readOVH(r)
+		case ovhEcoSourceKind:
+			snap, err = readOVHEco(r)
+		case oracleSourceKind:
+			snap, err = readOracle(r)
+		case ibmSourceKind:
+			snap, err = readIBM(r)
 		default:
 			return nil, fmt.Errorf("%s: not a source; use other-instances fetch to make one", path)
 		}

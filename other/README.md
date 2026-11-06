@@ -15,6 +15,12 @@ runpod.get("NVIDIA H100 80GB HBM3")?.pricing.onDemand;
 | `alibaba` | `AlibabaECS` | ECS instance types | the versioned price package behind Alibaba Cloud's ECS pricing page | May 2018 (version 2.0.0) |
 | `azure` | `AzureVM` | virtual machine sizes | Azure's Retail Prices API, with specs from Azure's pricing calculator | the first run |
 | `gcp` | `GCPCompute` | Compute Engine machine types | the Cloud Billing Catalog API and the Compute Engine API (needs [credentials](#gcp-credentials)) | the first run |
+| `hetzner` | `HetznerCloud` | cloud servers | the price API behind Hetzner's website, with specs from its cloud server pages | the first run |
+| `hetznerauction` | `HetznerAuction` | Server Auction listings | the JSON file behind the Server Auction page | the first run |
+| `ovh` | `OVHPublicCloud` | Public Cloud instance flavors | OVHcloud's public order catalog, World and US | the first run |
+| `ovheco` | `OVHEco` | Kimsufi, So you Start, Rise and Advance dedicated servers | OVHcloud's public eco catalog and availability list | the first run |
+| `oracle` | `OracleCompute` | VM and bare metal shapes | Oracle's price list API, with shapes from its cost estimator's data | the first run |
+| `ibm` | `IBMVPC` | Virtual Server for VPC profiles | IBM Cloud's Global Catalog | the first run |
 
 Each offer has its own reader and its own variant keys and terms (see [Offers](#offers)). Around them, the
 bundle, the merge rules and the publishing are shared, so adding a provider is a reader and a line in
@@ -29,6 +35,7 @@ go build -o other-instances .
 ./other-instances fetch runpod -o runpod.json                  # RunPod's current prices, as a source file
 ./other-instances fetch azure -o azure.json                    # Azure's current prices, as a source file
 ./other-instances fetch gcp -o gcp.json                        # Google Cloud's current prices (needs credentials)
+./other-instances fetch hetzner -o hetzner.json                # likewise hetznerauction, ovh, ovheco, oracle and ibm
 ./other-instances fetch alibaba -version 2.0.426 -o ali/       # one Alibaba price version, as a directory
 ./other-instances versions alibaba -after 2.0.400              # Alibaba versions published since
 
@@ -39,15 +46,16 @@ go test ./...
 ```
 
 `append` exits with status 3 when there is nothing to add: the source is not newer than the bundle's latest
-snapshot or, for RunPod, Azure and GCP, nothing in it changed.
+snapshot or, for every provider but Alibaba, nothing in it changed.
 
 The update scripts do the fetching and appending, creating the bundle if it doesn't exist:
 
 - `other/update-runpod.sh [runpod-bundle.json]` adds RunPod's current prices. RunPod has no price history to
   download, so the bundle starts on its first run. A read that changes nothing isn't recorded, so the
   snapshots list only grows when a price, attribute or data center changes.
-- `other/update-azure.sh [azure-bundle.json]` and `other/update-gcp.sh [gcp-bundle.json]` work the same way
-  for Azure and Google Cloud, which also publish only their current prices.
+- `other/update-azure.sh`, `update-gcp.sh`, `update-hetzner.sh`, `update-hetznerauction.sh`, `update-ovh.sh`,
+  `update-ovheco.sh`, `update-oracle.sh` and `update-ibm.sh` work the same way, each taking a bundle path, for
+  the other providers that publish only their current prices.
 - `other/update-alibaba.sh [alibaba-bundle.json]` adds every Alibaba version published since the bundle's
   `source_version`, oldest first. Without a bundle it seeds from version 2.0.0: 408 versions, about 10 GB of
   downloads, one version on disk at a time. `MAX_VERSIONS=n` stops after `n`. Re-running resumes.
@@ -173,6 +181,114 @@ For example, n2-standard-2 in us-central1 is 2 × $0.031611 + 8 × $0.004237 = $
 - **Gaps in Google's data:** a few regions list two SKUs for one family (`Memory-optimized ... in Virginia` and
   `... in Northern Virginia`). The lower price is kept, and `append` prints how many there were.
 
+### Hetzner cloud servers (`HetznerCloud`)
+
+Hetzner's Cloud API needs a token and answers in the account's currency, so prices come from the public API behind
+its website, `website-price-api.hetzner.com/api/v1/products/<id>`, which answers in USD and EUR without a key. That
+API only knows servers by product id (`CLOUD_132`), so `fetch hetzner` reads each server's name, specs and product id
+from the rows of `hetzner.com/cloud/cost-optimized/`, `regular-performance/` and `general-purpose/`. **This is the one
+source here that is parsed from a web page.** A row it can't read stops the fetch rather than dropping the server, so a
+redesign fails the publish job and leaves the published bundle alone. Servers no longer on those pages are recorded as
+deleted, even if existing ones keep running.
+
+- **Instances** are the Cloud API's names (`cx23`), priced per server per hour.
+- **Region:** the Cloud API's location names (`fsn1`, `ash`), with `name`, `country` and `locationType`
+  (`Hetzner Location`).
+- **Variant key:** `ipv4`, `IPv6 only` or `Primary IPv4`. A server's price leaves out its primary IPv4, which is optional
+  and billed apart ($0.001 an hour, $0.60 a month). `Primary IPv4` adds it, and is what the website shows.
+- **Terms:** the monthly cap, `[1mo, Monthly Cap, Postpaid]`, `hourly` 0 and `upfront` the cap. Hetzner bills by the hour
+  up to the cap at the end of the month, so nothing is paid up front; the field holds it because it is the term's total.
+- **Attributes:** `name`, `category`, `cores`, `cpu`, `architecture` (`arm64` for Ampere), `memoryInGb`, `diskInGb`,
+  `diskType` and `productFamily`. Availability isn't kept: it changes too often to be history.
+
+### Hetzner Server Auction (`HetznerAuction`)
+
+Read from `hetzner.com/_resources/app/data/app/live_data_sb.json`, the file behind the Server Auction page. Each listing is
+one physical server, so instances are listing ids (`3107671`), which are only meaningful while the listing is up: a
+server's history runs from the read that first sees it to the read after it is sold, when it is recorded as deleted.
+Auction prices fall on a timer, and the hourly read records each fall, not when within the hour it happened.
+
+- **Region:** the data center's site (`fsn1`), with the full name (`FSN1-DC4`) as the `datacenter` attribute.
+- **Variant key and terms:** as for cloud servers, using the listing's `IPPrices` for the primary IPv4.
+- **Attributes:** the listing's `Hardware` and `Details` (`CPU.Name`, `RAM.Size`, `Storage.Disks`, `Specials`, ...),
+  `fixedPrice` and `setupFee`. The countdown to the next price drop is left out.
+
+### OVHcloud Public Cloud (`OVHPublicCloud`)
+
+Read from `/order/catalog/public/cloud` on OVHcloud's World (`ca.api.ovh.com`, subsidiary `WS`) and US
+(`api.us.ovhcloud.com`) APIs, the two that sell in USD. Customers of OVHcloud's European subsidiaries are charged in EUR,
+at list prices that aren't these converted.
+
+- **Instances** are flavor names (`b3-8`), priced per hour. The Windows plan `win-b2-7` is `b2-7` with the `Windows`
+  variant of `operatingSystem`.
+- **Region:** the catalog prices by zone, and the list of regions in each zone needs a login, so the regions table has
+  pricing zones, not regions: `world` (standard regions), `3az`, `lz-eu`, `lz-eurozone` and `lz-af` (Local Zones), `us` and
+  `us-east-lz-dal-a`.
+- **Terms:** monthly plans, `[1mo, Monthly, Postpaid]` for `.monthly.postpaid` and `[1mo, Monthly, All Upfront]` for the US
+  catalog's `.monthly`, with `hourly` 0 and `upfront` the month's price. Newer flavors such as `b3-8` have none.
+- **Attributes:** the flavor's `blobs.technical`, flattened (`cpu.cores`, `memory.size`, `gpu.model`, `storage.disks`, ...),
+  `brick`, `brickSubtype` and `productFamily`.
+
+### OVHcloud eco dedicated servers (`OVHEco`)
+
+OVHcloud has no server auction. Its eco ranges (Kimsufi, So you Start, Rise and Advance, which the `range` attribute names)
+are the closest it has, at fixed prices. Read from `/order/catalog/public/eco` in USD, with the configurations from
+`/dedicated/server/datacenter/availabilities`.
+
+- **Instances** are server products (`24sys01`). **Unlike every other offer, these have no on-demand prices:** the servers can
+  only be rented by the month, so an hourly price would be a number OVHcloud doesn't charge. The rent is the term below, and
+  `billing` is `Monthly`. To compare with other clouds, divide the rent by the hours in a month.
+- **Region:** the data center (`gra`, `rbx`, `sgp`). A server sold in several sets of data centers has a plan per set, whose
+  code is the `planCode` attribute.
+- **Variant keys:** `memory`, `storage` and `systemStorage`, as the availability list names them. A configuration's price is
+  the plan's plus its options' and any other mandatory addon's. Options the list names but the catalog has no price for
+  (a few dozen, usually older memory speeds) are left out with a warning.
+- **Terms:** the month's rent, `[1mo, Rental, All Upfront]`, and prepaying, `[1yr|2yr, Prepaid, All Upfront]`, all with `hourly` 0
+  and `upfront` the whole term's price. Prepaying also waives the setup fee.
+- **Attributes:** the product's `blobs.technical.server` (`range`, `cpu.model`, `cpu.cores`, `frame.size`, ...), `invoiceName`,
+  `planCode`, `setupFee` (of the plan, in USD, once) and `productFamily`. Stock levels are left out.
+
+### Oracle Cloud compute (`OracleCompute`)
+
+Read from Oracle's price list API (`apexapps.oracle.com/pls/apex/cetools/api/v1/products/?currencyCode=USD`), with what each
+shape is billed for from its cost estimator's `productpresets.json`. Only `VM.` and `BM.` shapes are kept: those data also
+list shapes for Container Instances, dedicated VM hosts, Kubernetes pods and databases.
+
+- **Instances:** fixed shapes by name (`BM.GPU.H100.8`). Flexible shapes have no one price, so each is priced at powers of
+  two OCPUs and its maximum, at 4, 8 and 16 GB per OCPU within its maximum memory, and named `<shape>-<ocpus>-<GB>`
+  (`VM.Standard.E5.Flex-2-16`), **which are not names Oracle uses**. The `shape` attribute is Oracle's name, and `ocpuPrice`
+  and `memoryGbPrice` give any other size. Flexible Dense I/O shapes come in steps of 8 OCPUs with memory and NVMe in
+  proportion, so they are priced at those.
+- **Prices:** every part's quantity times its rate: `ocpus × OCPU rate + GB × memory rate + TB × NVMe rate`, or for GPU shapes
+  `GPUs × GPU rate`. Older shapes include memory in the OCPU rate. A part with a free tier (A1) has its paid rate.
+- **Region:** Oracle charges the same in every commercial region, so every row is in `global`.
+- **Variant key:** `operatingSystem`, `Linux`, or `Windows` for shapes that support it, which adds the Windows part's rate per OCPU.
+- **Left out:** preemptible (half price, but not listed as a price), burstable and capacity reservations, and other paid images.
+- **Attributes:** `shape`, `shapeType`, `processor`, `ocpus`, `memoryInGb`, `description`, `localDisk`, `gpuCount`, `gpuMemoryInGb`,
+  `nvmeInTb`, `allowPreemptible` and `allowBurstable`, and for flexible shapes `flexible`, `maxOcpus` and `maxMemoryInGb`.
+
+### IBM Cloud Virtual Server for VPC (`IBMVPC`)
+
+Read from the Global Catalog (`globalcatalog.cloud.ibm.com/api/v1`): every `instance.profile`, then for each pricing plan they
+use, `/<plan>/pricing/deployment`, which has its prices per region. That is several hundred plans, read 8 at a time, which
+takes seconds. Only deployments with the origin `pricing_catalog` that are a whole region are kept, as shared plans also list
+single zones and older per-profile deployments with other prices. Plans the catalog won't show are skipped.
+
+- **Instances** are profile names (`bx3d-2x10`), priced per hour. Classic infrastructure and bare metal aren't included.
+- **Prices** are dated by the catalog's `effective_from`, or by the fetch if that is later. Newer profiles have their own
+  price (`part-is.instance-hours-<profile>`). About 90 older ones (`bx2`, `cx2`, `mx2`, `gx2`, ...) share a plan **whose
+  per-vCPU and per-GB rates don't add up to what IBM charges**, a third of the price for GPU profiles. So they use the
+  per-profile rate for an hourly reservation. **That is an approximation.** It can be checked on the 67 profiles that have
+  both prices public: as of November 2026 it matches for 54, and for the other 13 (some `mx3d`, `gx3` and `bx3d` sizes) it is
+  between 9% under and 44% over. Profiles with neither (`ux2d-96x2800`, `vx2d-44x616`, whose plans are private)
+  are left out, as are the oldest profiles, which have no plan.
+- **Region:** the multizone region (`us-south`), limited to the regions the profile lists, with `name` and `locationType`.
+- **Variant key:** `capacityType`, `On-Demand`, `Spot`, or `Burstable 50%`, `25%` or `10%`.
+- **Terms:** `[1yr|3yr, Reserved, No Upfront]`, with the reservation's hourly rate, where its plan is public.
+- **Left out:** operating system and software licenses (prices are for free images) and dedicated hosts.
+- **Attributes:** the profile's `default_config`, flattened (`cpu`, `ram`, `vcpu_manufacturer`, `gpu_model`, `disks`, ...), with
+  `displayName`, `family`, `generation` and `productFamily`.
+
 ### GCP credentials
 
 `fetch gcp` needs an OAuth access token and a project to list machine types in. It looks, in order, for:
@@ -229,7 +345,7 @@ with the changes up to `t` applied. Rows are only added when something changes.
 
 ## Publishing
 
-The top-level `publish-runpod.sh`, `publish-alibaba.sh`, `publish-azure.sh` and `publish-gcp.sh` keep these bundles up to date in R2, in the same
+The top-level `publish-<platform>.sh` scripts keep these bundles up to date in R2, in the same
 bucket as the AWS ones, through the shared `publish-offer.sh` (see the [top-level README](../README.md#publishing)):
 it downloads the bundle `<platform>-latest` points at, runs `other/update-<platform>.sh` on it, and if the bundle
 changed, uploads `<platform>-bundle-<now>.json.xz` and moves `<platform>-latest`.
@@ -243,7 +359,7 @@ If the bucket has no `<platform>-latest`, the update script builds the bundle fr
 downloads every version. `SEED_BUNDLE=path` starts from a bundle built locally instead, and `RESEED=1`
 rebuilds a published bundle (needed if an offer's variant keys change).
 
-`.github/workflows/publish.yml` runs RunPod every 30 minutes, Azure and GCP hourly, and Alibaba every 6 hours.
+`.github/workflows/publish.yml` runs RunPod every 30 minutes, Azure, GCP, Hetzner, OVHcloud and Oracle hourly, and Alibaba and IBM every 6 hours.
 
 ## Adding a provider
 
@@ -268,6 +384,11 @@ alibaba.go      Alibaba fetcher, version prober and reader
 azure.go        Azure fetcher (parallel, split by filters) and reader
 gcp.go          GCP fetcher and reader, which prices machine types from their shape
 gcpauth.go      GCP access tokens from service account keys and user credentials
+hetzner.go      Hetzner cloud server and Server Auction fetchers and readers
+ovh.go          OVHcloud Public Cloud and eco fetchers and readers
+oracle.go       Oracle fetcher and reader, which prices shapes from their parts
+ibm.go          IBM fetcher and reader
 bundle_test.go  readers, history rules, fetchers against fake servers
 cloud_test.go   the same for Azure and GCP
+providers_test.go  the same for Hetzner, OVHcloud, Oracle and IBM
 ```

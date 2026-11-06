@@ -28,6 +28,14 @@ on:
     - cron: "44 * * * *" # azure
     # GCP hourly, likewise.
     - cron: "59 * * * *" # gcp
+    # Hetzner, OVHcloud and Oracle hourly, likewise. Each read takes seconds.
+    - cron: "25 * * * *" # hetzner
+    - cron: "35 * * * *" # hetznerauction
+    - cron: "5 * * * *" # ovh
+    - cron: "50 * * * *" # ovheco
+    - cron: "55 * * * *" # oracle
+    # IBM every 6 hours. Its prices change monthly.
+    - cron: "20 */6 * * *" # ibm
 
 permissions:
   contents: read
@@ -212,4 +220,70 @@ jobs:
       script: publish-gcp.sh
       go-module: other
       gcp-auth: true
+    secrets: inherit
+
+  hetzner:
+    if: github.event.schedule == '25 * * * *'
+    concurrency:
+      group: publish-hetzner
+      cancel-in-progress: false
+    uses: ./.github/workflows/publish-script.yml
+    with:
+      script: publish-hetzner.sh
+      go-module: other
+    secrets: inherit
+
+  hetznerauction:
+    if: github.event.schedule == '35 * * * *'
+    concurrency:
+      group: publish-hetznerauction
+      cancel-in-progress: false
+    uses: ./.github/workflows/publish-script.yml
+    with:
+      script: publish-hetznerauction.sh
+      go-module: other
+    secrets: inherit
+
+  ovh:
+    if: github.event.schedule == '5 * * * *'
+    concurrency:
+      group: publish-ovh
+      cancel-in-progress: false
+    uses: ./.github/workflows/publish-script.yml
+    with:
+      script: publish-ovh.sh
+      go-module: other
+    secrets: inherit
+
+  ovheco:
+    if: github.event.schedule == '50 * * * *'
+    concurrency:
+      group: publish-ovheco
+      cancel-in-progress: false
+    uses: ./.github/workflows/publish-script.yml
+    with:
+      script: publish-ovheco.sh
+      go-module: other
+    secrets: inherit
+
+  oracle:
+    if: github.event.schedule == '55 * * * *'
+    concurrency:
+      group: publish-oracle
+      cancel-in-progress: false
+    uses: ./.github/workflows/publish-script.yml
+    with:
+      script: publish-oracle.sh
+      go-module: other
+    secrets: inherit
+
+  ibm:
+    if: github.event.schedule == '20 */6 * * *'
+    concurrency:
+      group: publish-ibm
+      cancel-in-progress: false
+    uses: ./.github/workflows/publish-script.yml
+    with:
+      script: publish-ibm.sh
+      go-module: other
     secrets: inherit
