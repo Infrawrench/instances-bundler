@@ -3,12 +3,6 @@ name: publish
 # Each platform has its own cron and job. A scheduled run only knows which cron string started it,
 # so every cron string must be unique, and each job's `if` must repeat its platform's string exactly.
 on:
-  # Temporary, to start the first Hetzner, OVHcloud, Oracle and IBM runs by hand.
-  workflow_dispatch:
-    inputs:
-      platform:
-        type: choice
-        options: [hetzner, hetznerauction, ovh, ovheco, oracle, ibm]
   schedule:
     # EC2 every 5 minutes, the shortest interval GitHub allows. Runs can start late, or be skipped, under load.
     - cron: "*/5 * * * *"
@@ -229,7 +223,7 @@ jobs:
     secrets: inherit
 
   hetzner:
-    if: github.event.schedule == '25 * * * *' || inputs.platform == 'hetzner'
+    if: github.event.schedule == '25 * * * *'
     concurrency:
       group: publish-hetzner
       cancel-in-progress: false
@@ -240,7 +234,7 @@ jobs:
     secrets: inherit
 
   hetznerauction:
-    if: github.event.schedule == '35 * * * *' || inputs.platform == 'hetznerauction'
+    if: github.event.schedule == '35 * * * *'
     concurrency:
       group: publish-hetznerauction
       cancel-in-progress: false
@@ -251,7 +245,7 @@ jobs:
     secrets: inherit
 
   ovh:
-    if: github.event.schedule == '5 * * * *' || inputs.platform == 'ovh'
+    if: github.event.schedule == '5 * * * *'
     concurrency:
       group: publish-ovh
       cancel-in-progress: false
@@ -262,7 +256,7 @@ jobs:
     secrets: inherit
 
   ovheco:
-    if: github.event.schedule == '50 * * * *' || inputs.platform == 'ovheco'
+    if: github.event.schedule == '50 * * * *'
     concurrency:
       group: publish-ovheco
       cancel-in-progress: false
@@ -273,7 +267,7 @@ jobs:
     secrets: inherit
 
   oracle:
-    if: github.event.schedule == '55 * * * *' || inputs.platform == 'oracle'
+    if: github.event.schedule == '55 * * * *'
     concurrency:
       group: publish-oracle
       cancel-in-progress: false
@@ -284,7 +278,7 @@ jobs:
     secrets: inherit
 
   ibm:
-    if: github.event.schedule == '20 */6 * * *' || inputs.platform == 'ibm'
+    if: github.event.schedule == '20 */6 * * *'
     concurrency:
       group: publish-ibm
       cancel-in-progress: false
